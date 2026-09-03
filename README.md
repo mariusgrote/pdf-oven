@@ -11,6 +11,9 @@ and can no longer be selected, moved, or edited.
 open "build/PDF Oven.app"
 ```
 
+The app icon is generated, not hand-drawn: `swift Tools/make-icon.swift` redraws
+`Packaging/AppIcon.icns` from CoreGraphics primitives. Only rerun it if you change the design.
+
 Requires the Swift toolchain from Xcode or the Command Line Tools; no Xcode project needed.
 The script assembles `build/PDF Oven.app` and ad-hoc signs it. Move it to `/Applications`
 if you want it permanently.

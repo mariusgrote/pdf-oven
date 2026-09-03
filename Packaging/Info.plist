@@ -8,6 +8,8 @@
 	<string>PDF Oven</string>
 	<key>CFBundleExecutable</key>
 	<string>PDFOven</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.pdfoven.PDFOven</string>
 	<key>CFBundlePackageType</key>
