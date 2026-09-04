@@ -20,11 +20,15 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Packaging/Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" Packaging/Info.plist
 
-      - name: Build app bundle
-        run: ./build.sh
+      - name: Build Apple Silicon app
+        run: |
+          ./build.sh --arch arm64
+          ditto -c -k --keepParent "build/PDF Oven.app" "PDF-Oven-${GITHUB_REF_NAME}.zip"
 
-      - name: Zip app bundle
-        run: ditto -c -k --keepParent "build/PDF Oven.app" "PDF-Oven-${GITHUB_REF_NAME}.zip"
+      - name: Build Intel app
+        run: |
+          ./build.sh --arch x86_64
+          ditto -c -k --keepParent "build/PDF Oven.app" "PDF-Oven-${GITHUB_REF_NAME}-intel.zip"
 
       - name: Create release
         env:
@@ -33,4 +37,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            "PDF-Oven-${GITHUB_REF_NAME}.zip"
+            "PDF-Oven-${GITHUB_REF_NAME}.zip" \
+            "PDF-Oven-${GITHUB_REF_NAME}-intel.zip"
