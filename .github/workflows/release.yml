@@ -14,28 +14,33 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Stamp version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Packaging/Info.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" Packaging/Info.plist
-
       - name: Build Apple Silicon app
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUILD: ${{ github.run_number }}
         run: |
           ./build.sh --arch arm64
           ditto -c -k --keepParent "build/PDF Oven.app" "PDF-Oven-${GITHUB_REF_NAME}.zip"
 
       - name: Build Intel app
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUILD: ${{ github.run_number }}
         run: |
           ./build.sh --arch x86_64
           ditto -c -k --keepParent "build/PDF Oven.app" "PDF-Oven-${GITHUB_REF_NAME}-intel.zip"
 
-      - name: Create release
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            "PDF-Oven-${GITHUB_REF_NAME}.zip" \
-            "PDF-Oven-${GITHUB_REF_NAME}-intel.zip"
+          ASSETS=("PDF-Oven-${GITHUB_REF_NAME}.zip" "PDF-Oven-${GITHUB_REF_NAME}-intel.zip")
+          # The release may already exist when the tag was created from the GitHub UI.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber "${ASSETS[@]}"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              "${ASSETS[@]}"
+          fi

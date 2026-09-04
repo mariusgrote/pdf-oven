@@ -14,10 +14,11 @@
 	<string>com.pdfoven.PDFOven</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<!-- Placeholders; build.sh stamps the real version into the bundle copy. -->
 	<key>CFBundleShortVersionString</key>
-	<string>0.1</string>
+	<string>0.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
