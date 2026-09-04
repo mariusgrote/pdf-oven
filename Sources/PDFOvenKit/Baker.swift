@@ -2,14 +2,14 @@ import CoreGraphics
 import Foundation
 import PDFKit
 
-enum BakeError: LocalizedError {
+public enum BakeError: LocalizedError {
   case cannotOpen(URL)
   case passwordProtected(URL)
   case emptyDocument(URL)
   case contextFailed
   case writeFailed(URL)
 
-  var errorDescription: String? {
+  public var errorDescription: String? {
     switch self {
     case .cannotOpen(let url):
       return "\(url.lastPathComponent) is not a readable PDF."
@@ -27,8 +27,8 @@ enum BakeError: LocalizedError {
 
 /// Re-draws every page of a PDF into a fresh PDF context. Annotations are painted
 /// into the page content stream, so the result carries no editable annotation objects.
-enum Baker {
-  static func bake(input: URL, to output: URL) throws {
+public enum Baker {
+  public static func bake(input: URL, to output: URL) throws {
     guard let document = PDFDocument(url: input) else { throw BakeError.cannotOpen(input) }
     guard !document.isLocked else { throw BakeError.passwordProtected(input) }
     guard document.pageCount > 0 else { throw BakeError.emptyDocument(input) }
