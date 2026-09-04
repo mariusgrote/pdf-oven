@@ -23,7 +23,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string></string>
+	<string>Copyright © 2026 Marius Grote. MIT licensed.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

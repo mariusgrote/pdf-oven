@@ -41,3 +41,7 @@ new document is written from drawing commands only, so it contains no annotation
   with an error rather than being unlocked.
 
 Originals are never modified.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
