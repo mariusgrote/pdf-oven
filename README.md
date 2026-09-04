@@ -53,13 +53,18 @@ keeps diffs clean; there is no config file and no formatting gate in CI.
 
 ## Releases
 
-Push a `v*` tag and CI builds the app, stamps the version into the bundle from the tag, and
-attaches two builds to a GitHub release — `PDF-Oven-<tag>.zip` for Apple Silicon and
-`PDF-Oven-<tag>-intel.zip` for Intel Macs:
+Tag a commit `v*` — by pushing the tag, or by publishing a release in the GitHub UI, which
+creates it. Either way CI builds the app, stamps the tag into the bundle as
+`CFBundleShortVersionString` (so it shows in About PDF Oven and in Settings), and attaches
+`PDF-Oven-<tag>.zip` for Apple Silicon and `PDF-Oven-<tag>-intel.zip` for Intel Macs to the
+release, creating it if it does not exist yet:
 
 ```sh
-git tag v0.1 && git push origin v0.1
+git tag v0.1.0 && git push origin v0.1.0
 ```
+
+Local builds stamp `git describe` instead, so a dev build reads e.g. `0.1.0-3-gabc1234`.
+Override with `VERSION=1.2.3 ./build.sh`.
 
 The build is ad-hoc signed, not notarized, so the first launch needs a right-click → Open.
 

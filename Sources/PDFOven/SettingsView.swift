@@ -30,8 +30,20 @@ struct SettingsView: View {
       }
       Toggle("Replace an existing file with the same name", isOn: $replaceExisting)
       Toggle("Reveal each baked file in Finder", isOn: $revealWhenDone)
+      LabeledContent("Version:") {
+        Text(AppVersion.display)
+          .foregroundStyle(.secondary)
+          .textSelection(.enabled)
+      }
     }
     .formStyle(.grouped)
     .frame(width: 460)
   }
+}
+
+/// Reads what build.sh stamped into the bundle, so the app reports the released version.
+enum AppVersion {
+  static let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+  static let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+  static var display: String { "\(short) (\(build))" }
 }
