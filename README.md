@@ -44,9 +44,20 @@ Originals are never modified.
 
 ## Contributing
 
-CI runs on every pull request: `swift format lint --recursive --strict Sources Tools` and a
-release build. Run `swift format --in-place --recursive Sources Tools` before pushing; the
-project uses swift-format's default style (2-space indent), so there is no config file.
+CI builds the app on every pull request. The code follows swift-format's default style
+(2-space indent), so `swift format --in-place --recursive Sources Tools` before pushing
+keeps diffs clean; there is no config file and no formatting gate in CI.
+
+## Releases
+
+Push a `v*` tag and CI builds the app, stamps the version into the bundle from the tag, and
+attaches `PDF-Oven-<tag>.zip` to a GitHub release:
+
+```sh
+git tag v0.1 && git push origin v0.1
+```
+
+The build is ad-hoc signed, not notarized, so the first launch needs a right-click → Open.
 
 ## License
 
