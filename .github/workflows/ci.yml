@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Format
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: swift format lint --recursive --strict Sources Tools
+
+  build:
+    name: Build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build package
+        run: swift build -c release
+      - name: Assemble app bundle
+        run: ./build.sh
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDF-Oven-app
+          path: build/PDF Oven.app

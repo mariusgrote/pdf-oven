@@ -42,6 +42,12 @@ new document is written from drawing commands only, so it contains no annotation
 
 Originals are never modified.
 
+## Contributing
+
+CI runs on every pull request: `swift format lint --recursive --strict Sources Tools` and a
+release build. Run `swift format --in-place --recursive Sources Tools` before pushing; the
+project uses swift-format's default style (2-space indent), so there is no config file.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
