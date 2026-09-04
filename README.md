@@ -11,6 +11,9 @@ and can no longer be selected, moved, or edited.
 open "build/PDF Oven.app"
 ```
 
+`build.sh` builds for the host architecture by default; pass `--arch arm64` or
+`--arch x86_64` to cross-compile for the other one.
+
 The app icon is generated, not hand-drawn: `swift Tools/make-icon.swift` redraws
 `Packaging/AppIcon.icns` from CoreGraphics primitives. Only rerun it if you change the design.
 
@@ -41,6 +44,24 @@ new document is written from drawing commands only, so it contains no annotation
   with an error rather than being unlocked.
 
 Originals are never modified.
+
+## Contributing
+
+CI builds the app on every pull request. The code follows swift-format's default style
+(2-space indent), so `swift format --in-place --recursive Sources Tools` before pushing
+keeps diffs clean; there is no config file and no formatting gate in CI.
+
+## Releases
+
+Push a `v*` tag and CI builds the app, stamps the version into the bundle from the tag, and
+attaches two builds to a GitHub release — `PDF-Oven-<tag>.zip` for Apple Silicon and
+`PDF-Oven-<tag>-intel.zip` for Intel Macs:
+
+```sh
+git tag v0.1 && git push origin v0.1
+```
+
+The build is ad-hoc signed, not notarized, so the first launch needs a right-click → Open.
 
 ## License
 
