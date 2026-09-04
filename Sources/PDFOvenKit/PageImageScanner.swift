@@ -3,7 +3,7 @@ import Foundation
 import ImageIO
 
 /// Where an extracted image came from.
-public enum ImageSource: String, Codable, Sendable {
+enum ImageSource: Sendable {
   case page
   case stamp
   case attachment
@@ -24,9 +24,6 @@ struct ImageOccurrence {
   /// The transform in force where the image is painted, in the page's default user space.
   /// Only the rasterizing fallback needs it.
   var placement: CGAffineTransform?
-  /// False when the page's content stream could not be scanned and the images were found by
-  /// walking the resource dictionary instead, where order is undefined.
-  var ordered: Bool
   var resolveColorSpace: ImageDecoder.ColorSpaceResolver
 }
 
@@ -65,7 +62,6 @@ final class PageImageScanner {
   private var found: [ImageOccurrence] = []
   private var source: ImageSource = .page
   private var annotation: Int?
-  private var ordered = true
 
   init(page: CGPDFPage, number: Int) {
     self.page = page
@@ -83,16 +79,13 @@ final class PageImageScanner {
     found = []
     source = .page
     annotation = nil
-    ordered = true
     let contentStream = pageContentStream
     if !scan(contentStream, ctm: .identity) {
       // The scanner gave up partway. Fall back to the resource dictionary for anything it
-      // missed, and tell the caller the order is no longer the document's.
-      ordered = false
+      // missed.
       let seen = Set(found.compactMap(\.stream.identity))
       dictionaryPass(
         resources: PDFObject(dictionary: page.dictionary!)["Resources"], skipping: seen)
-      for index in found.indices { found[index].ordered = false }
     }
     return numbered(found)
   }
@@ -198,7 +191,7 @@ final class PageImageScanner {
     found.append(
       ImageOccurrence(
         stream: stream, facts: facts, page: number, order: 0, source: source,
-        annotation: annotation, placement: ctm, ordered: ordered,
+        annotation: annotation, placement: ctm,
         resolveColorSpace: { name in
           CGPDFContentStreamGetResource(contentStream, "ColorSpace", name).map(PDFObject.init)
         }))
@@ -218,7 +211,7 @@ final class PageImageScanner {
         found.append(
           ImageOccurrence(
             stream: xobject, facts: facts, page: number, order: 0, source: source,
-            annotation: annotation, placement: nil, ordered: false,
+            annotation: annotation, placement: nil,
             resolveColorSpace: { name in resources?["ColorSpace"]?[name] }))
       case "Form":
         recursing.insert(identity)
@@ -357,17 +350,9 @@ enum FileType {
     guard let source = CGImageSourceCreateWithData(data as CFData, nil),
       let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
     else { return nil }
-    let model: String
-    switch image.colorSpace?.model {
-    case .monochrome: model = "DeviceGray"
-    case .rgb: model = "DeviceRGB"
-    case .cmyk: model = "DeviceCMYK"
-    case .lab: model = "Lab"
-    default: model = "unknown"
-    }
     return ImageFacts(
       width: image.width, height: image.height, bitsPerComponent: image.bitsPerComponent,
-      colorSpace: model, filters: [], isMask: false, hasSoftMask: image.alphaInfo != .none)
+      isMask: false, hasSoftMask: image.alphaInfo != .none)
   }
 
   /// Strips everything that could make a name escape the output folder or hide there.

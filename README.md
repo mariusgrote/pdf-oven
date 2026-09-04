@@ -53,13 +53,12 @@ Originals are never modified.
 
 ```sh
 swift run PDFOvenCLI extract [--out DIR] [--min-size 32] [--no-dedupe] \
-  [--no-markup] [--no-index] file.pdf ...
+  [--no-markup] file.pdf ...
 ```
 
-The extractor keeps stored JPEG and JPEG 2000 bytes when possible. It reconstructs other
-pixel data as PNG and writes `index.json` with dimensions, source pages, filters, and any
-skipped images. By default it deduplicates repeated images and drops images smaller than 32
-pixels in either direction or 1 KB after encoding.
+The extractor keeps stored JPEG and JPEG 2000 bytes when possible and reconstructs other
+pixel data as PNG. By default it deduplicates repeated images and drops images smaller than
+32 pixels in either direction or 1 KB after encoding.
 
 It includes page image XObjects, stamp appearances, image file attachments, and images in the
 document's embedded-file name tree. Inline images inside page content (`BI … ID … EI`) are not

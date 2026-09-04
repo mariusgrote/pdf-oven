@@ -22,8 +22,6 @@ public enum FixturePDF {
     /// Files a default extraction writes: JPEG, soft-masked PNG, indexed, CMYK, logo,
     /// stamp, attachment, rotated-page image. The 4×4 spacer is not among them.
     public static let writtenFiles = 8
-    /// The logo is one XObject painted on three pages.
-    public static let logoPages = [1, 2, 3]
     /// The soft-masked image is opaque over its left half.
     public static let softMaskSize = 128
     public static let opaquePixels = softMaskSize * softMaskSize / 2

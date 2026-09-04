@@ -15,7 +15,6 @@ let usage = """
     --min-bytes N     skip output smaller than N bytes (default 1024)
     --no-dedupe       write one file per time an image is painted
     --no-markup       ignore stamp annotations and attached image files
-    --no-index        do not write index.json
     --prefer-original keep stored JPEG bytes instead of rebuilding transparency
     --replace         write into an images folder that already exists
   """
@@ -62,7 +61,6 @@ while let argument = arguments.first {
   case "--min-bytes": extractOptions.minByteSize = number("--min-bytes")
   case "--no-dedupe": extractOptions.dedupe = false
   case "--no-markup": extractOptions.includeMarkup = false
-  case "--no-index": extractOptions.writeIndex = false
   case "--prefer-original": extractOptions.preferOriginalEncoding = true
   case "--replace": placement.replace = true
   case "-h", "--help":

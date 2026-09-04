@@ -3,14 +3,11 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// What the extractor learned about one image XObject, whether or not it could decode it.
-/// Every field here also lands in `index.json`.
+/// What the extractor needs to decode one image XObject.
 struct ImageFacts {
   var width: Int
   var height: Int
   var bitsPerComponent: Int
-  var colorSpace: String
-  var filters: [String]
   var isMask: Bool
   var hasSoftMask: Bool
 }
@@ -19,15 +16,13 @@ struct ImageFacts {
 struct DecodedImage {
   var data: Data
   var fileExtension: String
-  /// The bytes came out of the PDF untouched, at the encoding the document stored.
-  var isOriginalEncoding: Bool
 }
 
 /// The outcome of the decode ladder for one image.
 enum DecodeOutcome {
   case decoded(DecodedImage)
   /// Nothing in the ladder could read the pixels; the caller may still rasterize the page.
-  case unreadable(reason: String)
+  case unreadable
 }
 
 /// Turns an image XObject into file bytes, trying in order: pass the stored bytes through
@@ -50,24 +45,9 @@ enum ImageDecoder {
       width: width,
       height: height,
       bitsPerComponent: isMask ? 1 : bits,
-      colorSpace: colorSpaceName(of: stream) ?? (isMask ? "ImageMask" : "unknown"),
-      filters: filterNames(of: stream),
       isMask: isMask,
       hasSoftMask: stream["SMask"]?.stream != nil || stream["Mask"]?.stream != nil
     )
-  }
-
-  private static func colorSpaceName(of stream: PDFObject) -> String? {
-    guard let space = stream["ColorSpace"] ?? stream["CS"] else { return nil }
-    if let name = space.name { return name }
-    if let family = space.array?.first?.name { return family }
-    return nil
-  }
-
-  private static func filterNames(of stream: PDFObject) -> [String] {
-    guard let filter = stream["Filter"] ?? stream["F"] else { return [] }
-    if let name = filter.name { return [name] }
-    return filter.array?.compactMap(\.name) ?? []
   }
 
   // MARK: - The ladder
@@ -78,11 +58,8 @@ enum ImageDecoder {
     resolver: ColorSpaceResolver,
     preferOriginalEncoding: Bool
   ) -> DecodeOutcome {
-    guard stream.stream != nil else { return .unreadable(reason: "not a stream") }
-    guard let (data, format) = streamData(stream) else {
-      return .unreadable(
-        reason: "stream data could not be read (\(facts.filters.joined(separator: "+")))")
-    }
+    guard stream.stream != nil else { return .unreadable }
+    guard let (data, format) = streamData(stream) else { return .unreadable }
 
     // Rung 1: the document already holds a real image file. Write those bytes verbatim —
     // original resolution, original chroma subsampling, no re-encode.
@@ -91,42 +68,36 @@ enum ImageDecoder {
       alpha = nil
     } else {
       guard let decodedAlpha = alphaChannel(of: stream, resolver: resolver) else {
-        return .unreadable(reason: "transparency mask could not be decoded")
+        return .unreadable
       }
       alpha = decodedAlpha
     }
     if preferOriginalEncoding || !facts.hasSoftMask {
       switch format {
       case .jpegEncoded:
-        return .decoded(DecodedImage(data: data, fileExtension: "jpg", isOriginalEncoding: true))
+        return .decoded(DecodedImage(data: data, fileExtension: "jpg"))
       case .JPEG2000:
-        return .decoded(DecodedImage(data: data, fileExtension: "jp2", isOriginalEncoding: true))
+        return .decoded(DecodedImage(data: data, fileExtension: "jp2"))
       default: break
       }
     }
 
     // Rung 2: rebuild the pixels ourselves and write a PNG.
     guard var image = pixels(data, format: format, stream: stream, facts: facts, resolver: resolver)
-    else {
-      return .unreadable(
-        reason: "unsupported colour space or encoding (\(facts.colorSpace), "
-          + "\(facts.filters.isEmpty ? "no filter" : facts.filters.joined(separator: "+")))")
-    }
+    else { return .unreadable }
     if let alpha {
       guard let combined = applying(alpha: alpha, to: image) else {
-        return .unreadable(reason: "transparency mask could not be applied")
+        return .unreadable
       }
       image = combined
     }
-    guard let png = png(from: image) else {
-      return .unreadable(reason: "PNG encoding failed")
-    }
-    return .decoded(DecodedImage(data: png, fileExtension: "png", isOriginalEncoding: false))
+    guard let png = png(from: image) else { return .unreadable }
+    return .decoded(DecodedImage(data: png, fileExtension: "png"))
   }
 
   /// Wraps a rasterized fallback the same way, so callers hand one type onwards.
   static func encodePNG(_ image: CGImage) -> DecodedImage? {
-    png(from: image).map { DecodedImage(data: $0, fileExtension: "png", isOriginalEncoding: false) }
+    png(from: image).map { DecodedImage(data: $0, fileExtension: "png") }
   }
 
   // MARK: - Rung 2: reconstruction

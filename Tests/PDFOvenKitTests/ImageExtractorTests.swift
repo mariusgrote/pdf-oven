@@ -17,38 +17,18 @@ final class ImageExtractorTests: XCTestCase {
 
     let files = try FileManager.default.contentsOfDirectory(
       at: result.folder, includingPropertiesForKeys: nil)
-    XCTAssertEqual(files.filter { $0.lastPathComponent != "index.json" }.count, 8)
+    XCTAssertEqual(files.count, 8)
     XCTAssertEqual(
       try Data(contentsOf: result.folder.appendingPathComponent("p001-01.jpg")),
       FixturePDF.embeddedJPEG())
 
-    let index = try manifest(in: result.folder)
-    XCTAssertEqual(index["document"] as? String, "fixture.pdf")
-    let images = try XCTUnwrap(index["images"] as? [[String: Any]])
-
-    let logo = try XCTUnwrap(images.first { ($0["filename"] as? String) == "p001-03.png" })
-    XCTAssertEqual(logo["pages"] as? [Int], FixturePDF.Expectation.logoPages)
-    XCTAssertEqual(logo["source"] as? String, "page")
-    XCTAssertEqual(logo["rasterized"] as? Bool, false)
-
-    let spacer = try XCTUnwrap(images.first { ($0["width"] as? Int) == 4 })
-    XCTAssertEqual(spacer["skipped"] as? Bool, true)
-    XCTAssertEqual(spacer["reason"] as? String, "smaller than 32 px")
-
-    let attachment = try XCTUnwrap(
-      images.first { ($0["source"] as? String) == "attachment" })
-    XCTAssertEqual(attachment["width"] as? Int, 96)
-    XCTAssertEqual(attachment["height"] as? Int, 96)
-    XCTAssertEqual(attachment["colorSpace"] as? String, "DeviceRGB")
-
-    let writtenPageImage = try XCTUnwrap(
-      images.first { ($0["filename"] as? String) == "p001-01.jpg" })
-    XCTAssertEqual(
-      Set(writtenPageImage.keys),
-      Set([
-        "bitsPerComponent", "bytes", "colorSpace", "filename", "filters", "height",
-        "ordered", "originalEncoding", "pages", "rasterized", "skipped", "source", "width",
-      ]))
+    XCTAssertTrue(files.contains { $0.lastPathComponent.contains("-stamp.") })
+    let attachmentURL = try XCTUnwrap(
+      files.first { $0.lastPathComponent.contains("-attach-") })
+    let attachmentSource = try XCTUnwrap(CGImageSourceCreateWithURL(attachmentURL as CFURL, nil))
+    let attachment = try XCTUnwrap(CGImageSourceCreateImageAtIndex(attachmentSource, 0, nil))
+    XCTAssertEqual(attachment.width, 96)
+    XCTAssertEqual(attachment.height, 96)
   }
 
   func testSoftMaskBecomesAlpha() throws {
@@ -84,9 +64,10 @@ final class ImageExtractorTests: XCTestCase {
       fixture.input, options: Options())
 
     XCTAssertEqual(result.written, 8)
-    let images = try XCTUnwrap(try manifest(in: result.folder)["images"] as? [[String: Any]])
-    XCTAssertFalse(images.contains { ($0["source"] as? String) == "stamp" })
-    XCTAssertFalse(images.contains { ($0["source"] as? String) == "attachment" })
+    let files = try FileManager.default.contentsOfDirectory(
+      at: result.folder, includingPropertiesForKeys: nil)
+    XCTAssertFalse(files.contains { $0.lastPathComponent.contains("-stamp.") })
+    XCTAssertFalse(files.contains { $0.lastPathComponent.contains("-attach-") })
   }
 
   func testImagesFolderNeverContainsAnInput() throws {
@@ -110,10 +91,5 @@ final class ImageExtractorTests: XCTestCase {
     let input = directory.appendingPathComponent("fixture.pdf")
     try FixturePDF.data().write(to: input)
     return (directory, input)
-  }
-
-  private func manifest(in folder: URL) throws -> [String: Any] {
-    let data = try Data(contentsOf: folder.appendingPathComponent("index.json"))
-    return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
   }
 }

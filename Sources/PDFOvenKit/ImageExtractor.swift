@@ -8,8 +8,6 @@ public struct ExtractOptions: Sendable {
   public var includeMarkup: Bool
   /// Write one file per distinct image rather than one per time it is painted.
   public var dedupe: Bool
-  /// Write `index.json` describing everything found, including what was skipped.
-  public var writeIndex: Bool
   /// Keep the stored JPEG bytes even when the image has a soft mask, instead of
   /// reconstructing it as a PNG with transparency.
   public var preferOriginalEncoding: Bool
@@ -21,14 +19,12 @@ public struct ExtractOptions: Sendable {
   public init(
     includeMarkup: Bool = true,
     dedupe: Bool = true,
-    writeIndex: Bool = true,
     preferOriginalEncoding: Bool = false,
     minPixelSize: Int = 32,
     minByteSize: Int = 1024
   ) {
     self.includeMarkup = includeMarkup
     self.dedupe = dedupe
-    self.writeIndex = writeIndex
     self.preferOriginalEncoding = preferOriginalEncoding
     self.minPixelSize = minPixelSize
     self.minByteSize = minByteSize
@@ -117,25 +113,22 @@ public struct ImageExtractor: PDFOperation {
     if extractOptions.includeMarkup {
       for payload in EmbeddedFiles.images(in: document) { session.take(payload) }
     }
-    try session.finish(document: input.lastPathComponent)
     return session.result
   }
 }
 
 // MARK: - One document's extraction
 
-/// Accumulates one document's output: what was written, what was folded into an earlier file,
-/// and what was left out and why.
+/// Accumulates one document's extracted files and counts.
 private final class Session {
   private let folder: URL
   private let options: ExtractOptions
-  private var entries: [IndexEntry] = []
-  /// Content hash of the written bytes to the entry that holds them, for dedupe.
-  private var byContent: [String: Int] = [:]
+  /// Content hashes of written files, for dedupe.
+  private var writtenContent: Set<String> = []
   /// XObject identity to its decode outcome, so a logo on 50 pages decodes once.
   private var byStream: [Int: DecodeOutcome] = [:]
-  /// Entry index for an already-handled XObject, so repeats only add a page number.
-  private var handledStream: [Int: Int] = [:]
+  /// XObjects already handled, so repeated uses do not produce another file.
+  private var handledStreams: Set<Int> = []
   private var usedNames: Set<String> = []
   private(set) var written = 0
   private(set) var skipped = 0
@@ -156,67 +149,54 @@ private final class Session {
     let facts = occurrence.facts
     let identity = occurrence.stream.identity
 
-    // A repeat of an image already dealt with: record the page and move on.
-    if options.dedupe, let identity, let index = handledStream[identity] {
-      add(page: occurrence.page, to: index)
+    // A repeat of an image already dealt with needs no second file.
+    if options.dedupe, let identity, handledStreams.contains(identity) {
       return
     }
     guard facts.width >= options.minPixelSize, facts.height >= options.minPixelSize else {
       skipped += 1
-      note(
-        IndexEntry(occurrence, skipped: true, reason: "smaller than \(options.minPixelSize) px"),
-        stream: identity)
+      markHandled(identity)
       return
     }
 
     let outcome = decode(occurrence)
     var image: DecodedImage
-    var rasterized = false
     switch outcome {
     case .decoded(let decoded):
       image = decoded
-    case .unreadable(let reason):
+    case .unreadable:
       // Rung 3: nothing read the stored pixels, so render the page where the image sits.
       guard let fallback = Rasterizer.render(occurrence, on: page),
         let encoded = ImageDecoder.encodePNG(fallback)
       else {
         skipped += 1
-        note(IndexEntry(occurrence, skipped: true, reason: reason), stream: identity)
+        markHandled(identity)
         return
       }
       image = encoded
-      rasterized = true
     }
 
     guard image.data.count >= options.minByteSize else {
       skipped += 1
-      note(
-        IndexEntry(occurrence, skipped: true, reason: "under \(options.minByteSize) bytes"),
-        stream: identity)
+      markHandled(identity)
       return
     }
 
     // Two different XObjects can still hold the same picture.
     let key = contentKey(image.data, facts: facts)
-    if options.dedupe, let index = byContent[key] {
-      add(page: occurrence.page, to: index)
-      if let identity { handledStream[identity] = index }
+    if options.dedupe, writtenContent.contains(key) {
+      markHandled(identity)
       return
     }
 
     let filename = unique(name(for: occurrence) + "." + image.fileExtension)
     guard write(image.data, as: filename) else {
       skipped += 1
-      note(IndexEntry(occurrence, skipped: true, reason: "could not be written"), stream: identity)
+      markHandled(identity)
       return
     }
-    var entry = IndexEntry(occurrence, skipped: false, reason: nil)
-    entry.filename = filename
-    entry.bytes = image.data.count
-    entry.rasterized = rasterized
-    entry.originalEncoding = image.isOriginalEncoding
-    note(entry, stream: identity)
-    byContent[key] = entries.count - 1
+    markHandled(identity)
+    writtenContent.insert(key)
   }
 
   private func decode(_ occurrence: ImageOccurrence) -> DecodeOutcome {
@@ -228,11 +208,10 @@ private final class Session {
     return outcome
   }
 
-  /// Distinct images can decode to the same bytes only if they really are the same image, but
-  /// the dimensions and colour space go into the key anyway — they are already in hand.
+  /// Distinct image objects can still decode to the same bytes.
   private func contentKey(_ data: Data, facts: ImageFacts) -> String {
     let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    return "\(digest)-\(facts.width)x\(facts.height)-\(facts.bitsPerComponent)-\(facts.colorSpace)"
+    return "\(digest)-\(facts.width)x\(facts.height)"
   }
 
   // MARK: Attached files
@@ -242,34 +221,23 @@ private final class Session {
       facts.width < options.minPixelSize || facts.height < options.minPixelSize
     {
       skipped += 1
-      note(
-        IndexEntry(
-          payload, filename: nil, skipped: true, reason: "smaller than \(options.minPixelSize) px"))
       return
     }
     guard payload.data.count >= options.minByteSize else {
       skipped += 1
-      note(
-        IndexEntry(
-          payload, filename: nil, skipped: true, reason: "under \(options.minByteSize) bytes"))
       return
     }
     let digest = SHA256.hash(data: payload.data).map { String(format: "%02x", $0) }.joined()
     let facts = payload.facts
     let key =
       "file-\(digest)-\(facts?.width ?? 0)x\(facts?.height ?? 0)-\(facts?.bitsPerComponent ?? 0)"
-    if options.dedupe, let index = byContent[key] {
-      add(page: payload.page, to: index)
-      return
-    }
+    if options.dedupe, writtenContent.contains(key) { return }
     let filename = unique(name(for: payload) + "." + payload.fileExtension)
     guard write(payload.data, as: filename) else {
       skipped += 1
-      note(IndexEntry(payload, filename: nil, skipped: true, reason: "could not be written"))
       return
     }
-    note(IndexEntry(payload, filename: filename, skipped: false, reason: nil))
-    byContent[key] = entries.count - 1
+    writtenContent.insert(key)
   }
 
   // MARK: Output
@@ -285,26 +253,8 @@ private final class Session {
     }
   }
 
-  func finish(document: String) throws {
-    guard options.writeIndex else { return }
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    let manifest = IndexFile(document: document, images: entries)
-    try encoder.encode(manifest).write(
-      to: folder.appendingPathComponent("index.json"), options: .atomic)
-  }
-
-  private func note(_ entry: IndexEntry) { entries.append(entry) }
-
-  private func note(_ entry: IndexEntry, stream identity: Int?) {
-    entries.append(entry)
-    if options.dedupe, let identity { handledStream[identity] = entries.count - 1 }
-  }
-
-  private func add(page: Int, to index: Int) {
-    guard page > 0 else { return }
-    guard !entries[index].pages.contains(page) else { return }
-    entries[index].pages.append(page)
+  private func markHandled(_ identity: Int?) {
+    if options.dedupe, let identity { handledStreams.insert(identity) }
   }
 
   // MARK: Naming
@@ -345,61 +295,6 @@ private final class Session {
     }
     usedNames.insert(candidate.lowercased())
     return candidate
-  }
-}
-
-// MARK: - index.json
-
-private struct IndexFile: Encodable {
-  var document: String
-  var images: [IndexEntry]
-}
-
-private struct IndexEntry: Encodable {
-  var filename: String?
-  var source: ImageSource
-  var pages: [Int]
-  var width: Int?
-  var height: Int?
-  var bitsPerComponent: Int?
-  var colorSpace: String?
-  var filters: [String]?
-  var bytes: Int?
-  /// The image was recovered by rendering the page rather than by reading its pixels, so it
-  /// may include whatever else the page paints over that area.
-  var rasterized = false
-  var originalEncoding = false
-  var skipped = false
-  var reason: String?
-  /// False when the page's content stream would not scan, so the order of the page's images
-  /// is the resource dictionary's rather than the document's.
-  var ordered = true
-
-  init(_ occurrence: ImageOccurrence, skipped: Bool, reason: String?) {
-    source = occurrence.source
-    pages = [occurrence.page]
-    width = occurrence.facts.width
-    height = occurrence.facts.height
-    bitsPerComponent = occurrence.facts.bitsPerComponent
-    colorSpace = occurrence.facts.colorSpace
-    filters = occurrence.facts.filters
-    self.skipped = skipped
-    self.reason = reason
-    ordered = occurrence.ordered
-  }
-
-  init(_ payload: FilePayload, filename: String?, skipped: Bool, reason: String?) {
-    self.filename = filename
-    source = payload.source
-    pages = payload.page > 0 ? [payload.page] : []
-    bytes = skipped ? nil : payload.data.count
-    width = payload.facts?.width
-    height = payload.facts?.height
-    bitsPerComponent = payload.facts?.bitsPerComponent
-    colorSpace = payload.facts?.colorSpace
-    filters = payload.facts?.filters
-    self.skipped = skipped
-    self.reason = reason
   }
 }
 
@@ -444,8 +339,7 @@ private enum EmbeddedFiles {
 
 /// The last rung of the ladder. JBIG2, undecoded CCITT fax and tint-transform colour spaces
 /// have no pixels we can read, so the page is rendered at the image's own resolution and the
-/// image's placement is cut out of it. Fidelity drops — anything painted over that area comes
-/// along — which is why the manifest flags it.
+/// image's placement is cut out of it. Anything painted over that area comes along too.
 private enum Rasterizer {
   static func render(_ occurrence: ImageOccurrence, on page: CGPDFPage) -> CGImage? {
     guard let placement = occurrence.placement else { return nil }
