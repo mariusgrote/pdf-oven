@@ -4,6 +4,8 @@ import Foundation
 public enum Destination {
   /// Appended to the stem when the caller gives no suffix of its own.
   public static let defaultSuffix = "-baked"
+  /// Appended to the stem for the folder an extraction fills.
+  public static let imagesSuffix = "-images"
 
   /// Picks an output URL for `input`, honouring the caller's suffix, folder and replace
   /// preferences. `protecting` lists files the output must never land on — the input
@@ -40,6 +42,42 @@ public enum Destination {
       || protected.contains(identity(of: output))
     {
       output = candidate("\(base) \(counter)")
+      counter += 1
+    }
+    return output
+  }
+
+  /// Picks an output *folder* for `input` — `<stem>-images`, next to the input or inside the
+  /// configured folder.
+  ///
+  /// `replace` means "write into a folder that is already there", never "delete it first": a
+  /// folder collision can clobber a whole user directory, which is worse than clobbering one
+  /// file. A candidate that holds any protected input is numbered around regardless.
+  public static func imagesFolder(
+    for input: URL,
+    folder: URL?,
+    replace: Bool,
+    protecting others: [URL] = []
+  ) -> URL {
+    let directory = folder ?? input.deletingLastPathComponent()
+    let stem = input.deletingPathExtension().lastPathComponent
+    let protected = ([input] + others).map(identity(of:))
+
+    func candidate(_ base: String) -> URL {
+      directory.appendingPathComponent(stem + base)
+    }
+
+    func holdsAnInput(_ url: URL) -> Bool {
+      let path = identity(of: url)
+      return protected.contains { $0 == path || $0.hasPrefix(path + "/") }
+    }
+
+    var output = candidate(imagesSuffix)
+    var counter = 2
+    while holdsAnInput(output)
+      || (!replace && FileManager.default.fileExists(atPath: output.path))
+    {
+      output = candidate("\(imagesSuffix) \(counter)")
       counter += 1
     }
     return output

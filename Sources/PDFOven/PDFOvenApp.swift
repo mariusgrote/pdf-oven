@@ -20,6 +20,8 @@ struct PDFOvenApp: App {
       CommandGroup(replacing: .newItem) {
         Button("Open PDFs…") { oven.add(FilePicker.chooseInputs()) }
           .keyboardShortcut("o")
+        Button("Extract Images…") { oven.extract(FilePicker.chooseExtractInputs()) }
+          .keyboardShortcut("e")
       }
     }
 
@@ -40,12 +42,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum FilePicker {
   @MainActor
   static func chooseInputs() -> [URL] {
+    chooseInputs(message: "Choose PDFs to bake", prompt: "Bake")
+  }
+
+  @MainActor
+  static func chooseExtractInputs() -> [URL] {
+    chooseInputs(message: "Choose PDFs to extract images from", prompt: "Extract")
+  }
+
+  @MainActor
+  private static func chooseInputs(message: String, prompt: String) -> [URL] {
     let panel = NSOpenPanel()
     panel.allowedContentTypes = [.pdf]
     panel.allowsMultipleSelection = true
     panel.canChooseDirectories = true
-    panel.message = "Choose PDFs to bake"
-    panel.prompt = "Bake"
+    panel.message = message
+    panel.prompt = prompt
     return panel.runModal() == .OK ? panel.urls : []
   }
 
