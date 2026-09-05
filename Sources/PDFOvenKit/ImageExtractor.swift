@@ -46,6 +46,7 @@ public enum ExtractError: LocalizedError {
   case passwordProtected(URL)
   case emptyDocument(URL)
   case folderFailed(URL)
+  case writeFailed(URL, underlyingError: Error)
 
   public var errorDescription: String? {
     switch self {
@@ -53,7 +54,16 @@ public enum ExtractError: LocalizedError {
     case .passwordProtected(let url): return "\(url.lastPathComponent) is password protected."
     case .emptyDocument(let url): return "\(url.lastPathComponent) has no pages."
     case .folderFailed(let url): return "Could not create \(url.lastPathComponent)."
+    case .writeFailed(let url, let underlying):
+      return "Could not write \(url.path): \(underlying.localizedDescription)"
     }
+  }
+
+  /// The Cocoa error behind a failed write — no permission, a full disk — kept so the
+  /// reason survives the trip to the caller.
+  public var underlyingError: Error? {
+    guard case .writeFailed(_, let underlying) = self else { return nil }
+    return underlying
   }
 }
 
@@ -97,21 +107,21 @@ public struct ImageExtractor: PDFOperation {
     for number in 1...document.numberOfPages {
       guard let page = document.page(at: number) else { continue }
       // A 600 DPI scan is gigabytes if the decoded buffers pile up behind us.
-      autoreleasepool {
+      try autoreleasepool {
         let scanner = PageImageScanner(page: page, number: number)
         for occurrence in scanner.contentImages() {
-          autoreleasepool { session.take(occurrence, on: page) }
+          try autoreleasepool { try session.take(occurrence, on: page) }
         }
         guard extractOptions.includeMarkup else { return }
         let markup = scanner.markupImages()
         for occurrence in markup.images {
-          autoreleasepool { session.take(occurrence, on: page) }
+          try autoreleasepool { try session.take(occurrence, on: page) }
         }
-        for payload in markup.files { session.take(payload) }
+        for payload in markup.files { try session.take(payload) }
       }
     }
     if extractOptions.includeMarkup {
-      for payload in EmbeddedFiles.images(in: document) { session.take(payload) }
+      for payload in EmbeddedFiles.images(in: document) { try session.take(payload) }
     }
     return session.result
   }
@@ -145,7 +155,7 @@ private final class Session {
 
   // MARK: Image XObjects
 
-  func take(_ occurrence: ImageOccurrence, on page: CGPDFPage) {
+  func take(_ occurrence: ImageOccurrence, on page: CGPDFPage) throws {
     let facts = occurrence.facts
     let identity = occurrence.stream.identity
 
@@ -190,11 +200,7 @@ private final class Session {
     }
 
     let filename = unique(name(for: occurrence) + "." + image.fileExtension)
-    guard write(image.data, as: filename) else {
-      skipped += 1
-      markHandled(identity)
-      return
-    }
+    try write(image.data, as: filename)
     markHandled(identity)
     writtenContent.insert(key)
   }
@@ -216,7 +222,7 @@ private final class Session {
 
   // MARK: Attached files
 
-  func take(_ payload: FilePayload) {
+  func take(_ payload: FilePayload) throws {
     if let facts = payload.facts,
       facts.width < options.minPixelSize || facts.height < options.minPixelSize
     {
@@ -233,24 +239,23 @@ private final class Session {
       "file-\(digest)-\(facts?.width ?? 0)x\(facts?.height ?? 0)-\(facts?.bitsPerComponent ?? 0)"
     if options.dedupe, writtenContent.contains(key) { return }
     let filename = unique(name(for: payload) + "." + payload.fileExtension)
-    guard write(payload.data, as: filename) else {
-      skipped += 1
-      return
-    }
+    try write(payload.data, as: filename)
     writtenContent.insert(key)
   }
 
   // MARK: Output
 
-  private func write(_ data: Data, as filename: String) -> Bool {
+  /// A file we meant to write and could not is a failed extraction, not a skipped image:
+  /// counting it as skipped would report success over a missing file.
+  private func write(_ data: Data, as filename: String) throws {
+    let destination = folder.appendingPathComponent(filename)
     do {
-      try data.write(to: folder.appendingPathComponent(filename), options: .atomic)
-      written += 1
-      bytes += data.count
-      return true
+      try data.write(to: destination, options: .atomic)
     } catch {
-      return false
+      throw ExtractError.writeFailed(destination, underlyingError: error)
     }
+    written += 1
+    bytes += data.count
   }
 
   private func markHandled(_ identity: Int?) {

@@ -84,6 +84,36 @@ final class ImageExtractorTests: XCTestCase {
     XCTAssertEqual(FileType.sanitize("..\\..\\invoice:final.jpg"), "invoice-final")
   }
 
+  func testUnwritableFolderFailsTheExtraction() throws {
+    let fixture = try makeFixture()
+    let folder = fixture.directory.appendingPathComponent("fixture-images", isDirectory: true)
+    defer {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+      try? FileManager.default.removeItem(at: fixture.directory)
+    }
+    // The folder is already there, so `replace` keeps the name and the extraction writes
+    // into a directory it has no permission to write into.
+    try FileManager.default.createDirectory(
+      at: folder, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o500])
+    let options = Options(suffix: "", folder: nil, replace: true)
+
+    XCTAssertThrowsError(try ImageExtractor().extract(fixture.input, options: options)) { error in
+      guard case ExtractError.writeFailed(let url, let underlying) = error else {
+        return XCTFail("expected a write failure, got \(error)")
+      }
+      XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "fixture-images")
+      XCTAssertTrue(
+        error.localizedDescription.contains(url.path),
+        "the message should name the file that could not be written")
+      XCTAssertEqual((underlying as NSError).domain, NSCocoaErrorDomain)
+      XCTAssertNotNil((error as? ExtractError)?.underlyingError)
+    }
+    let files = try FileManager.default.contentsOfDirectory(
+      at: folder, includingPropertiesForKeys: nil)
+    XCTAssertTrue(files.isEmpty)
+  }
+
   private func makeFixture() throws -> (directory: URL, input: URL) {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("pdfoven-tests-\(UUID().uuidString)", isDirectory: true)
