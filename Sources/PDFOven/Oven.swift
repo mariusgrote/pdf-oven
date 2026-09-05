@@ -103,6 +103,7 @@ final class Oven: ObservableObject {
     let reveal = UserDefaults.standard.bool(forKey: Preference.revealWhenDone)
 
     while let index = items.firstIndex(where: { $0.status == .waiting }) {
+      let itemID = items[index].id
       let input = items[index].input
       let action = items[index].action
       items[index].status = .working
@@ -137,7 +138,9 @@ final class Oven: ObservableObject {
         }
       }.value
 
-      guard let current = items.firstIndex(where: { $0.input == input }) else { continue }
+      // The same file can be queued twice — once to bake, once to extract — so the entry is
+      // found again by its id; matching on the input alone would update the wrong one.
+      guard let current = items.firstIndex(where: { $0.id == itemID }) else { continue }
       switch result {
       case .success(let completion):
         items[current].status = .done(completion.0, completion.1)
