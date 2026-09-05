@@ -25,6 +25,67 @@ enum DecodeOutcome {
   case unreadable
 }
 
+/// Overflow-safe arithmetic for the numbers a stream dictionary is free to lie about.
+///
+/// `/Width`, `/Height` and `/BitsPerComponent` come straight out of the file, so every product
+/// derived from them — pixel counts, packed row lengths, buffer sizes — is computed with
+/// reporting arithmetic and capped here. A manipulated dictionary then yields `nil`, which the
+/// decode ladder reports as `.unreadable`, rather than a trap or a gigabyte allocation.
+enum ImageGeometry {
+  /// The ceiling the rasterizer already worked to, applied to every decode path: 64 megapixels.
+  static let maxPixelCount = 64_000_000
+
+  /// The depths PDF allows for image samples. `/ImageMask` is 1 bit by definition.
+  static let supportedBitDepths: Set<Int> = [1, 2, 4, 8, 16]
+  /// `/Indexed` indices are never 16 bit.
+  static let indexedBitDepths: Set<Int> = [1, 2, 4, 8]
+
+  static func isSupportedBitDepth(_ bits: Int, indexed: Bool = false) -> Bool {
+    (indexed ? indexedBitDepths : supportedBitDepths).contains(bits)
+  }
+
+  static func product(_ lhs: Int, _ rhs: Int) -> Int? {
+    let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+    return overflow ? nil : value
+  }
+
+  static func sum(_ lhs: Int, _ rhs: Int) -> Int? {
+    let (value, overflow) = lhs.addingReportingOverflow(rhs)
+    return overflow ? nil : value
+  }
+
+  /// `width * height`, rejected when it overflows or exceeds the ceiling.
+  static func pixelCount(width: Int, height: Int) -> Int? {
+    guard width > 0, height > 0, let count = product(width, height), count <= maxPixelCount else {
+      return nil
+    }
+    return count
+  }
+
+  /// The length of one packed row: `(width * components * bits + 7) / 8`.
+  static func bytesPerRow(width: Int, components: Int, bitsPerComponent: Int) -> Int? {
+    guard width > 0, components > 0, bitsPerComponent > 0,
+      let samples = product(width, components),
+      let bits = product(samples, bitsPerComponent),
+      let padded = sum(bits, 7)
+    else { return nil }
+    return padded / 8
+  }
+
+  /// `bytesPerRow * height`: how many bytes a packed image has to supply.
+  static func bufferSize(bytesPerRow: Int, height: Int) -> Int? {
+    guard bytesPerRow > 0, height > 0 else { return nil }
+    return product(bytesPerRow, height)
+  }
+
+  /// `width * height * channels`: the size of an unpacked buffer we allocate ourselves, so it
+  /// carries the pixel ceiling as well.
+  static func bufferSize(width: Int, height: Int, channels: Int) -> Int? {
+    guard channels > 0, let pixels = pixelCount(width: width, height: height) else { return nil }
+    return product(pixels, channels)
+  }
+}
+
 /// Turns an image XObject into file bytes, trying in order: pass the stored bytes through
 /// untouched, rebuild a `CGImage` from the stream dictionary, or give up and say why. The
 /// third rung — rasterizing the page region — needs the page, so it lives in `ImageExtractor`.
@@ -41,6 +102,9 @@ enum ImageDecoder {
     else { return nil }
     let isMask = (stream["ImageMask"] ?? stream["IM"])?.boolean ?? false
     let bits = (stream["BitsPerComponent"] ?? stream["BPC"])?.integer ?? (isMask ? 1 : 8)
+    // A stencil is 1 bit whatever the dictionary claims; everything else has to name a depth
+    // PDF actually defines, so nothing downstream divides by or shifts past a bogus one.
+    guard isMask || ImageGeometry.isSupportedBitDepth(bits) else { return nil }
     return ImageFacts(
       width: width,
       height: height,
@@ -129,8 +193,12 @@ enum ImageDecoder {
       return indexedImage(
         data, facts: facts, baseComponents: baseComponents, palette: palette, highest: highest)
     case .direct(let cgSpace, let components):
-      let bytesPerRow = (facts.width * components * facts.bitsPerComponent + 7) / 8
-      guard data.count >= bytesPerRow * facts.height,
+      guard ImageGeometry.pixelCount(width: facts.width, height: facts.height) != nil,
+        let bytesPerRow = ImageGeometry.bytesPerRow(
+          width: facts.width, components: components, bitsPerComponent: facts.bitsPerComponent),
+        let needed = ImageGeometry.bufferSize(bytesPerRow: bytesPerRow, height: facts.height),
+        let bitsPerPixel = ImageGeometry.product(facts.bitsPerComponent, components),
+        data.count >= needed,
         let provider = CGDataProvider(data: data as CFData)
       else { return nil }
       let order: CGBitmapInfo = facts.bitsPerComponent == 16 ? .byteOrder16Big : .byteOrderDefault
@@ -138,7 +206,7 @@ enum ImageDecoder {
         width: facts.width,
         height: facts.height,
         bitsPerComponent: facts.bitsPerComponent,
-        bitsPerPixel: facts.bitsPerComponent * components,
+        bitsPerPixel: bitsPerPixel,
         bytesPerRow: bytesPerRow,
         space: cgSpace,
         bitmapInfo: CGBitmapInfo(rawValue: order.rawValue | CGImageAlphaInfo.none.rawValue),
@@ -171,6 +239,7 @@ enum ImageDecoder {
     case "ICCBased":
       let profile = array.count > 1 ? array[1] : nil
       let components = profile?["N"]?.integer ?? 3
+      guard (1...4).contains(components) else { return nil }
       if let profile, let (data, _) = streamData(profile),
         let iccSpace = CGColorSpace(iccData: data as CFData)
       {
@@ -179,7 +248,7 @@ enum ImageDecoder {
       // A broken or unreadable profile still tells us how many components the pixels have.
       return deviceSpace(components: components)
     case "Indexed", "I":
-      guard array.count >= 4, let highest = array[2].integer,
+      guard array.count >= 4, let highest = array[2].integer, highest >= 0,
         let base = baseComponents(of: array[1], resolver: resolver),
         let palette = paletteBytes(array[3])
       else { return nil }
@@ -227,7 +296,9 @@ enum ImageDecoder {
     }
     guard let array = space.array, let family = array.first?.name else { return nil }
     switch family {
-    case "ICCBased": return array.count > 1 ? (array[1]["N"]?.integer ?? 3) : 3
+    case "ICCBased":
+      let components = array.count > 1 ? (array[1]["N"]?.integer ?? 3) : 3
+      return (1...4).contains(components) ? components : nil
     case "CalRGB", "Lab": return 3
     case "CalGray": return 1
     default: return nil
@@ -252,9 +323,16 @@ enum ImageDecoder {
   private static func indexedImage(
     _ data: Data, facts: ImageFacts, baseComponents: Int, palette: Data, highest: Int
   ) -> CGImage? {
-    let bytesPerRow = (facts.width * facts.bitsPerComponent + 7) / 8
-    guard data.count >= bytesPerRow * facts.height else { return nil }
-    var rgb = [UInt8](repeating: 0, count: facts.width * facts.height * 3)
+    guard ImageGeometry.isSupportedBitDepth(facts.bitsPerComponent, indexed: true),
+      let bytesPerRow = ImageGeometry.bytesPerRow(
+        width: facts.width, components: 1, bitsPerComponent: facts.bitsPerComponent),
+      let needed = ImageGeometry.bufferSize(bytesPerRow: bytesPerRow, height: facts.height),
+      let rgbCount = ImageGeometry.bufferSize(
+        width: facts.width, height: facts.height, channels: 3),
+      let rgbPerRow = ImageGeometry.product(facts.width, 3),
+      data.count >= needed
+    else { return nil }
+    var rgb = [UInt8](repeating: 0, count: rgbCount)
     data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
       for y in 0..<facts.height {
         let row = y * bytesPerRow
@@ -272,7 +350,7 @@ enum ImageDecoder {
     guard let provider = CGDataProvider(data: Data(rgb) as CFData) else { return nil }
     return CGImage(
       width: facts.width, height: facts.height, bitsPerComponent: 8, bitsPerPixel: 24,
-      bytesPerRow: facts.width * 3, space: CGColorSpaceCreateDeviceRGB(),
+      bytesPerRow: rgbPerRow, space: CGColorSpaceCreateDeviceRGB(),
       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue), provider: provider,
       decode: nil, shouldInterpolate: false, intent: .defaultIntent)
   }
@@ -282,7 +360,8 @@ enum ImageDecoder {
   {
     func byte(_ index: Int) -> UInt8 {
       let position = offset + index
-      return position < palette.count ? palette[palette.startIndex + position] : 0
+      guard position >= 0, position < palette.count else { return 0 }
+      return palette[palette.startIndex + position]
     }
     switch components {
     case 1: return (byte(0), byte(0), byte(0))
@@ -298,10 +377,15 @@ enum ImageDecoder {
   /// 255 where a stencil mask paints, 0 where it does not. `/Decode [1 0]` flips the sense.
   private static func stencilAlpha(_ data: Data, facts: ImageFacts, decode: [CGFloat]?) -> [UInt8]?
   {
-    let bytesPerRow = (facts.width + 7) / 8
-    guard data.count >= bytesPerRow * facts.height else { return nil }
+    guard
+      let bytesPerRow = ImageGeometry.bytesPerRow(
+        width: facts.width, components: 1, bitsPerComponent: 1),
+      let needed = ImageGeometry.bufferSize(bytesPerRow: bytesPerRow, height: facts.height),
+      let count = ImageGeometry.pixelCount(width: facts.width, height: facts.height),
+      data.count >= needed
+    else { return nil }
     let inverted = (decode?.first ?? 0) == 1
-    var alpha = [UInt8](repeating: 0, count: facts.width * facts.height)
+    var alpha = [UInt8](repeating: 0, count: count)
     data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
       for y in 0..<facts.height {
         let row = y * bytesPerRow
@@ -316,7 +400,12 @@ enum ImageDecoder {
   }
 
   private static func grayImage(gray: [UInt8], alpha: [UInt8], facts: ImageFacts) -> CGImage? {
-    var interleaved = [UInt8](repeating: 0, count: gray.count * 2)
+    guard gray.count == alpha.count,
+      ImageGeometry.pixelCount(width: facts.width, height: facts.height) == gray.count,
+      let interleavedCount = ImageGeometry.product(gray.count, 2),
+      let bytesPerRow = ImageGeometry.product(facts.width, 2)
+    else { return nil }
+    var interleaved = [UInt8](repeating: 0, count: interleavedCount)
     for index in 0..<gray.count {
       interleaved[index * 2] = gray[index]
       interleaved[index * 2 + 1] = alpha[index]
@@ -324,7 +413,7 @@ enum ImageDecoder {
     guard let provider = CGDataProvider(data: Data(interleaved) as CFData) else { return nil }
     return CGImage(
       width: facts.width, height: facts.height, bitsPerComponent: 8, bitsPerPixel: 16,
-      bytesPerRow: facts.width * 2, space: CGColorSpaceCreateDeviceGray(),
+      bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceGray(),
       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), provider: provider,
       decode: nil, shouldInterpolate: false, intent: .defaultIntent)
   }
@@ -336,11 +425,14 @@ enum ImageDecoder {
     switch bits {
     case 8: return Int(buffer[row + x])
     case 16: return Int(buffer[row + x * 2])
-    default:
+    case 1, 2, 4:
       let perByte = 8 / bits
       let byte = Int(buffer[row + x / perByte])
       let shift = 8 - bits * (x % perByte + 1)
       return (byte >> shift) & ((1 << bits) - 1)
+    // Callers check the depth first; any other value would divide by or shift past a number
+    // the format never allows.
+    default: return 0
     }
   }
 
@@ -381,15 +473,19 @@ enum ImageDecoder {
   private static func applying(alpha: CGImage, to image: CGImage) -> CGImage? {
     let width = image.width
     let height = image.height
+    guard let count = ImageGeometry.pixelCount(width: width, height: height),
+      let byteCount = ImageGeometry.product(count, 4),
+      let bytesPerRow = ImageGeometry.product(width, 4)
+    else { return nil }
     let rect = CGRect(x: 0, y: 0, width: width, height: height)
-    var pixels = [UInt8](repeating: 0, count: width * height * 4)
-    var coverage = [UInt8](repeating: 255, count: width * height)
+    var pixels = [UInt8](repeating: 0, count: byteCount)
+    var coverage = [UInt8](repeating: 255, count: count)
 
     let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
       guard
         let context = CGContext(
           data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
-          bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+          bytesPerRow: bytesPerRow, space: CGColorSpace(name: CGColorSpace.sRGB)!,
           bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
       else { return false }
       context.draw(image, in: rect)
@@ -407,12 +503,12 @@ enum ImageDecoder {
       context.draw(alpha, in: rect)
     }
 
-    for index in 0..<(width * height) { pixels[index * 4 + 3] = coverage[index] }
+    for index in 0..<count { pixels[index * 4 + 3] = coverage[index] }
     guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
     // Straight (unpremultiplied) alpha: the RGB above was drawn over an opaque buffer.
     return CGImage(
       width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
-      bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+      bytesPerRow: bytesPerRow, space: CGColorSpace(name: CGColorSpace.sRGB)!,
       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), provider: provider,
       decode: nil, shouldInterpolate: false, intent: .defaultIntent)
   }

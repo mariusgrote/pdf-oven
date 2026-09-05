@@ -348,9 +348,18 @@ private enum Rasterizer {
 
     let facts = occurrence.facts
     let scale = max(CGFloat(facts.width) / area.width, CGFloat(facts.height) / area.height)
-    let width = max(1, Int((area.width * scale).rounded()))
-    let height = max(1, Int((area.height * scale).rounded()))
-    guard width * height <= 64_000_000, let space = CGColorSpace(name: CGColorSpace.sRGB),
+    // `/Width` and `/Height` come from the file, so the scaled extent can be absurd or not a
+    // number at all. Reject it before `Int(_:)`, which traps rather than saturates.
+    let scaledWidth = (area.width * scale).rounded()
+    let scaledHeight = (area.height * scale).rounded()
+    let ceiling = CGFloat(ImageGeometry.maxPixelCount)
+    guard scaledWidth.isFinite, scaledHeight.isFinite,
+      scaledWidth <= ceiling, scaledHeight <= ceiling
+    else { return nil }
+    let width = max(1, Int(scaledWidth))
+    let height = max(1, Int(scaledHeight))
+    guard ImageGeometry.pixelCount(width: width, height: height) != nil,
+      let space = CGColorSpace(name: CGColorSpace.sRGB),
       let context = CGContext(
         data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
         space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
