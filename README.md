@@ -65,6 +65,12 @@ document's embedded-file name tree. Inline images inside page content (`BI … I
 supported. Ink, highlights, squares, text annotations, and other non-image markup produce no
 output.
 
+Every path is checked before anything is written: one that does not exist, a file that is not
+a PDF, or a folder holding no PDFs ends the call with exit status 2 and no output at all, so a
+mistyped argument cannot leave a half-finished run behind. A PDF that exists but cannot be
+opened is a failure of the run, not of the call: the other inputs are still extracted and the
+exit status is 1.
+
 ## Contributing
 
 CI builds the app on every pull request. The code follows swift-format's default style

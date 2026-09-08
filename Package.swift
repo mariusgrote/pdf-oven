@@ -44,6 +44,12 @@ let package = Package(
       swiftSettings: [.swiftLanguageMode(.v5)]
     ),
     .testTarget(
+      name: "PDFOvenCLITests",
+      dependencies: ["PDFOvenCLI", "PDFOvenFixtures"],
+      path: "Tests/PDFOvenCLITests",
+      swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
+    .testTarget(
       name: "PDFOvenKitTests",
       dependencies: ["PDFOvenKit", "PDFOvenFixtures"],
       path: "Tests/PDFOvenKitTests",
