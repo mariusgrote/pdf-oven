@@ -15,16 +15,20 @@ import UniformTypeIdentifiers
 /// - page 1: a baseline JPEG, an RGB image with a soft mask, the logo
 /// - page 2: an indexed-palette image, a CMYK image, a 4×4 spacer, the logo
 /// - page 3: the logo, an image stamp annotation, a PNG file attachment
-/// - page 4: rotated 90°, carrying one image
+/// - page 4: rotated 90°, carrying one image and one colour-key masked image
 public enum FixturePDF {
   /// Every image the fixture stores, and what an extraction should make of it.
   public enum Expectation {
     /// Files a default extraction writes: JPEG, soft-masked PNG, indexed, CMYK, logo,
-    /// stamp, attachment, rotated-page image. The 4×4 spacer is not among them.
-    public static let writtenFiles = 8
+    /// stamp, attachment, rotated-page image, colour-key masked PNG. The 4×4 spacer is not
+    /// among them.
+    public static let writtenFiles = 9
     /// The soft-masked image is opaque over its left half.
     public static let softMaskSize = 128
     public static let opaquePixels = softMaskSize * softMaskSize / 2
+    /// The colour-key masked image is transparent over its left half — the half whose samples
+    /// were built to sit inside the ranges its `/Mask` array names.
+    public static let colorKeyTransparentPixels = softMaskSize * softMaskSize / 2
   }
 
   public static func data() -> Data {
@@ -108,6 +112,15 @@ public enum FixturePDF {
         + "/ColorSpace /DeviceRGB /BitsPerComponent 8",
       data: rgbPixels(side, side) { x, y in texture(x, y, seed: 3) })
 
+    // A colour key rather than a mask stream: `/Mask` names an inclusive range per component,
+    // and a pixel is transparent where all three of its samples fall inside their range.
+    let keyedRef = builder.reserve()
+    builder.flateStream(
+      keyedRef,
+      dictionary: "/Type /XObject /Subtype /Image /Width 128 /Height 128 "
+        + "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Mask [10 20 20 30 30 40]",
+      data: rgbPixels(side, side) { x, y in colourKeyed(x, y, side: side) })
+
     let rotatedRef = builder.reserve()
     builder.flateStream(
       rotatedRef,
@@ -167,8 +180,12 @@ public enum FixturePDF {
       ),
       ("/ImLogo \(logoRef) 0 R", Data("q 96 0 0 48 40 300 cm /ImLogo Do Q".utf8)),
       (
-        "/ImRotated \(rotatedRef) 0 R",
-        Data("q 128 0 0 128 40 560 cm /ImRotated Do Q".utf8)
+        "/ImRotated \(rotatedRef) 0 R /ImKeyed \(keyedRef) 0 R",
+        Data(
+          """
+          q 128 0 0 128 40 560 cm /ImRotated Do Q
+          q 128 0 0 128 40 380 cm /ImKeyed Do Q
+          """.utf8)
       ),
     ]
 
@@ -232,6 +249,17 @@ public enum FixturePDF {
       }
     }
     return context.makeImage()
+  }
+
+  /// The left half sits inside `/Mask [10 20 20 30 30 40]`; the right half's red channel is
+  /// pushed clear of it, so no pixel there can fall inside the ranges by accident. Both halves
+  /// stay noisy enough that the PNG comes out over the extractor's 1 KB floor.
+  private static func colourKeyed(_ x: Int, _ y: Int, side: Int) -> (UInt8, UInt8, UInt8) {
+    let (red, green, blue) = texture(x, y, seed: 6)
+    guard x >= side / 2 else {
+      return (10 + UInt8(x % 11), 20 + UInt8(y % 11), 30 + UInt8((x + y) % 11))
+    }
+    return (128 + red / 2, green, blue)
   }
 
   /// A cheap pseudo-random texture. Deterministic, so the fixture is byte-stable between runs.

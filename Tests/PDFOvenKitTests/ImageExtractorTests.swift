@@ -17,7 +17,7 @@ final class ImageExtractorTests: XCTestCase {
 
     let files = try FileManager.default.contentsOfDirectory(
       at: result.folder, includingPropertiesForKeys: nil)
-    XCTAssertEqual(files.count, 8)
+    XCTAssertEqual(files.count, FixturePDF.Expectation.writtenFiles)
     XCTAssertEqual(
       try Data(contentsOf: result.folder.appendingPathComponent("p001-01.jpg")),
       FixturePDF.embeddedJPEG())
@@ -35,25 +35,23 @@ final class ImageExtractorTests: XCTestCase {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
     let result = try ImageExtractor().extract(fixture.input, options: Options())
-    let imageURL = result.folder.appendingPathComponent("p001-02.png")
-    let source = try XCTUnwrap(CGImageSourceCreateWithURL(imageURL as CFURL, nil))
-    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    let alpha = try alphaChannel(of: result.folder.appendingPathComponent("p001-02.png"))
 
-    var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
-    let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
-      guard
-        let context = CGContext(
-          data: buffer.baseAddress, width: image.width, height: image.height,
-          bitsPerComponent: 8, bytesPerRow: image.width * 4,
-          space: CGColorSpaceCreateDeviceRGB(),
-          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-      else { return false }
-      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-      return true
-    }
-    XCTAssertTrue(rendered)
-    let opaque = stride(from: 3, to: pixels.count, by: 4).filter { pixels[$0] == 255 }.count
-    XCTAssertEqual(opaque, FixturePDF.Expectation.opaquePixels)
+    XCTAssertEqual(alpha.filter { $0 == 255 }.count, FixturePDF.Expectation.opaquePixels)
+  }
+
+  /// The other shape of `/Mask`: an array of ranges rather than a stream. The fixture's image
+  /// was built so exactly its left half falls inside them.
+  func testColorKeyMaskBecomesTransparent() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let result = try ImageExtractor().extract(fixture.input, options: Options())
+    let alpha = try alphaChannel(of: result.folder.appendingPathComponent("p004-02.png"))
+
+    XCTAssertEqual(
+      alpha.filter { $0 == 0 }.count, FixturePDF.Expectation.colorKeyTransparentPixels)
+    XCTAssertEqual(
+      alpha.filter { $0 == 255 }.count, FixturePDF.Expectation.colorKeyTransparentPixels)
   }
 
   func testOptionsCanKeepRepeatsAndExcludeMarkup() throws {
@@ -63,7 +61,8 @@ final class ImageExtractorTests: XCTestCase {
     let result = try ImageExtractor(extractOptions: options).extract(
       fixture.input, options: Options())
 
-    XCTAssertEqual(result.written, 8)
+    // Every page image, the repeated logo among them; the stamp and the attachment are not.
+    XCTAssertEqual(result.written, 9)
     let files = try FileManager.default.contentsOfDirectory(
       at: result.folder, includingPropertiesForKeys: nil)
     XCTAssertFalse(files.contains { $0.lastPathComponent.contains("-stamp.") })
@@ -112,6 +111,26 @@ final class ImageExtractorTests: XCTestCase {
     let files = try FileManager.default.contentsOfDirectory(
       at: folder, includingPropertiesForKeys: nil)
     XCTAssertTrue(files.isEmpty)
+  }
+
+  /// The alpha of every pixel of a written PNG, row by row.
+  private func alphaChannel(of url: URL) throws -> [UInt8] {
+    let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+      guard
+        let context = CGContext(
+          data: buffer.baseAddress, width: image.width, height: image.height,
+          bitsPerComponent: 8, bytesPerRow: image.width * 4,
+          space: CGColorSpaceCreateDeviceRGB(),
+          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+      else { return false }
+      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+      return true
+    }
+    XCTAssertTrue(rendered)
+    return stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] }
   }
 
   private func makeFixture() throws -> (directory: URL, input: URL) {

@@ -3,13 +3,27 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+/// The transparency an image stream carries alongside its pixels.
+enum ImageTransparency: Equatable {
+  case none
+  /// `/SMask`, or a `/Mask` that is an image in its own right: a second stream whose samples
+  /// say how much of this one shows.
+  case maskStream
+  /// `/Mask` as an array — a colour key: one inclusive `min max` pair per colour component, and
+  /// a pixel is transparent when every one of its original component values falls inside its
+  /// own pair. The bounds are checked against the colour space at decode time, where the
+  /// component count is known; an array holding anything but numbers arrives here empty and is
+  /// refused there along with every other malformed one.
+  case colorKey([CGFloat])
+}
+
 /// What the extractor needs to decode one image XObject.
 struct ImageFacts {
   var width: Int
   var height: Int
   var bitsPerComponent: Int
   var isMask: Bool
-  var hasSoftMask: Bool
+  var transparency: ImageTransparency
 }
 
 /// A decoded image, ready to be written to disk.
@@ -42,6 +56,12 @@ enum ImageGeometry {
 
   static func isSupportedBitDepth(_ bits: Int, indexed: Bool = false) -> Bool {
     (indexed ? indexedBitDepths : supportedBitDepths).contains(bits)
+  }
+
+  /// The largest sample value a depth can express: `2^bits - 1`, and `nil` for a depth PDF
+  /// does not define, so nothing shifts by a number out of a file.
+  static func highestSample(bits: Int) -> Int? {
+    isSupportedBitDepth(bits) ? (1 << bits) - 1 : nil
   }
 
   static func product(_ lhs: Int, _ rhs: Int) -> Int? {
@@ -110,8 +130,19 @@ enum ImageDecoder {
       height: height,
       bitsPerComponent: isMask ? 1 : bits,
       isMask: isMask,
-      hasSoftMask: stream["SMask"]?.stream != nil || stream["Mask"]?.stream != nil
+      transparency: transparency(of: stream)
     )
+  }
+
+  /// Which of the three shapes `/SMask` and `/Mask` come in this stream uses. `/SMask` wins
+  /// where a producer wrote both, the way the spec asks.
+  private static func transparency(of stream: PDFObject) -> ImageTransparency {
+    if stream["SMask"]?.stream != nil { return .maskStream }
+    guard let mask = stream["Mask"] else { return .none }
+    if mask.stream != nil { return .maskStream }
+    guard let entries = mask.array else { return .none }
+    let bounds = entries.compactMap(\.real)
+    return .colorKey(bounds.count == entries.count ? bounds : [])
   }
 
   // MARK: - The ladder
@@ -124,19 +155,24 @@ enum ImageDecoder {
   ) -> DecodeOutcome {
     guard stream.stream != nil else { return .unreadable }
     guard let (data, format) = streamData(stream) else { return .unreadable }
+    // Either the caller asked for the stored bytes, or the stream carries no transparency to
+    // rebuild. Both mean the pixels come out the way the document holds them.
+    let rebuildsTransparency = !preferOriginalEncoding && facts.transparency != .none
 
-    // Rung 1: the document already holds a real image file. Write those bytes verbatim —
-    // original resolution, original chroma subsampling, no re-encode.
-    let alpha: CGImage?
-    if preferOriginalEncoding || !facts.hasSoftMask {
-      alpha = nil
-    } else {
+    // An `/SMask` or a `/Mask` stream is a picture of its own, so it is decoded first: an image
+    // whose transparency we cannot read is not one we can write.
+    var alpha: CGImage?
+    if rebuildsTransparency, facts.transparency == .maskStream {
       guard let decodedAlpha = alphaChannel(of: stream, resolver: resolver) else {
         return .unreadable
       }
       alpha = decodedAlpha
     }
-    if preferOriginalEncoding || !facts.hasSoftMask {
+
+    // Rung 1: the document already holds a real image file. Write those bytes verbatim —
+    // original resolution, original chroma subsampling, no re-encode. A JPEG that needs
+    // transparency bolted on cannot take this rung: the file format has nowhere to put it.
+    if !rebuildsTransparency {
       switch format {
       case .jpegEncoded:
         return .decoded(DecodedImage(data: data, fileExtension: "jpg"))
@@ -149,6 +185,14 @@ enum ImageDecoder {
     // Rung 2: rebuild the pixels ourselves and write a PNG.
     guard var image = pixels(data, format: format, stream: stream, facts: facts, resolver: resolver)
     else { return .unreadable }
+    if rebuildsTransparency, case .colorKey(let bounds) = facts.transparency {
+      guard
+        let keyed = colorKeyAlpha(
+          bounds, data: data, format: format, decoded: image, stream: stream, facts: facts,
+          resolver: resolver)
+      else { return .unreadable }
+      alpha = keyed
+    }
     if let alpha {
       guard let combined = applying(alpha: alpha, to: image) else {
         return .unreadable
@@ -424,7 +468,9 @@ enum ImageDecoder {
   ) -> Int {
     switch bits {
     case 8: return Int(buffer[row + x])
-    case 16: return Int(buffer[row + x * 2])
+    // PDF stores 16-bit samples big-endian; both bytes are read so a colour key sees the
+    // value the file wrote rather than half of it.
+    case 16: return Int(buffer[row + x * 2]) << 8 | Int(buffer[row + x * 2 + 1])
     case 1, 2, 4:
       let perByte = 8 / bits
       let byte = Int(buffer[row + x / perByte])
@@ -437,6 +483,141 @@ enum ImageDecoder {
   }
 
   // MARK: - Transparency
+
+  /// The alpha a `/Mask` array asks for: 0 where every component of a pixel falls inside its
+  /// own range, 255 everywhere else. Returned as a grey image so it joins the soft-mask path.
+  ///
+  /// A colour key names *sample* values, so it is read before anything turns those samples into
+  /// colours: for `/Indexed` the ranges cover the index itself, not the RGB the palette makes
+  /// of it.
+  private static func colorKeyAlpha(
+    _ bounds: [CGFloat], data: Data, format: CGPDFDataFormat, decoded: CGImage,
+    stream: PDFObject, facts: ImageFacts, resolver: ColorSpaceResolver
+  ) -> CGImage? {
+    // A stencil paints one colour and has no components to compare.
+    guard !facts.isMask, let space = colorSpace(of: stream, facts: facts, resolver: resolver)
+    else { return nil }
+    let components: Int
+    switch space {
+    case .indexed: components = 1
+    case .direct(_, let count): components = count
+    }
+    guard let ranges = colorKeyRanges(bounds, components: components, bits: facts.bitsPerComponent),
+      let count = ImageGeometry.pixelCount(width: facts.width, height: facts.height)
+    else { return nil }
+
+    var coverage = [UInt8](repeating: 255, count: count)
+    let keyed =
+      format == .raw
+      ? keyPackedSamples(data, facts: facts, ranges: ranges, into: &coverage)
+      : keyDecodedSamples(decoded, facts: facts, ranges: ranges, into: &coverage)
+    guard keyed else { return nil }
+    return grayImage(
+      gray: coverage, alpha: [UInt8](repeating: 255, count: count), facts: facts)
+  }
+
+  /// The ranges a `/Mask` array names: exactly two integers per colour component, in order, and
+  /// inside what `/BitsPerComponent` can express. Anything else is not a colour key we can
+  /// trust, and the ladder drops to the rasterizer rather than guess at what was meant.
+  private static func colorKeyRanges(_ bounds: [CGFloat], components: Int, bits: Int)
+    -> [ClosedRange<Int>]?
+  {
+    guard components > 0, bounds.count == components * 2,
+      let highest = ImageGeometry.highestSample(bits: bits)
+    else { return nil }
+    var ranges: [ClosedRange<Int>] = []
+    ranges.reserveCapacity(components)
+    for pair in stride(from: 0, to: bounds.count, by: 2) {
+      let low = bounds[pair]
+      let high = bounds[pair + 1]
+      // Sample values are whole numbers, so `10.5` is not a bound any depth could match.
+      // The comparisons also strand a NaN or an infinity a file is free to write.
+      guard low == low.rounded(), high == high.rounded(),
+        low >= 0, high <= CGFloat(highest), low <= high
+      else { return nil }
+      ranges.append(Int(low)...Int(high))
+    }
+    return ranges
+  }
+
+  /// Walks the packed samples in the layout `/BitsPerComponent` and the colour space give them,
+  /// and clears the coverage of every pixel the key covers.
+  private static func keyPackedSamples(
+    _ data: Data, facts: ImageFacts, ranges: [ClosedRange<Int>], into coverage: inout [UInt8]
+  ) -> Bool {
+    let components = ranges.count
+    guard
+      let bytesPerRow = ImageGeometry.bytesPerRow(
+        width: facts.width, components: components, bitsPerComponent: facts.bitsPerComponent),
+      let needed = ImageGeometry.bufferSize(bytesPerRow: bytesPerRow, height: facts.height),
+      data.count >= needed
+    else { return false }
+    data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+      for y in 0..<facts.height {
+        let row = y * bytesPerRow
+        for x in 0..<facts.width {
+          var masked = true
+          for component in 0..<components {
+            let value = sample(
+              source, row: row, at: x * components + component, bits: facts.bitsPerComponent)
+            guard ranges[component].contains(value) else {
+              masked = false
+              break
+            }
+          }
+          if masked { coverage[y * facts.width + x] = 0 }
+        }
+      }
+    }
+    return true
+  }
+
+  /// The same for a JPEG or JPEG 2000 payload, whose samples only exist once ImageIO has
+  /// decoded them. Eight-bit grey and RGB come back out of a bitmap context in the space they
+  /// went in, so the values the key sees are still the ones the payload stores; a CMYK or
+  /// deeper image would come back through a conversion, so its key is left to the rasterizer.
+  private static func keyDecodedSamples(
+    _ image: CGImage, facts: ImageFacts, ranges: [ClosedRange<Int>], into coverage: inout [UInt8]
+  ) -> Bool {
+    let components = ranges.count
+    guard facts.bitsPerComponent == 8, components == 1 || components == 3,
+      image.width == facts.width, image.height == facts.height,
+      // A payload that decoded to something other than what the dictionary promised would be
+      // converted on the way back out, and the key would be reading made-up numbers.
+      image.colorSpace?.numberOfComponents == components
+    else { return false }
+    // A bitmap context holds one channel or four, never three.
+    let channels = components == 1 ? 1 : 4
+    guard
+      let byteCount = ImageGeometry.bufferSize(
+        width: facts.width, height: facts.height, channels: channels),
+      let bytesPerRow = ImageGeometry.product(facts.width, channels)
+    else { return false }
+    var samples = [UInt8](repeating: 0, count: byteCount)
+    let drawn = samples.withUnsafeMutableBytes { buffer -> Bool in
+      guard
+        let context = CGContext(
+          data: buffer.baseAddress, width: facts.width, height: facts.height, bitsPerComponent: 8,
+          bytesPerRow: bytesPerRow,
+          space: channels == 1 ? CGColorSpaceCreateDeviceGray() : CGColorSpaceCreateDeviceRGB(),
+          bitmapInfo: (channels == 1 ? CGImageAlphaInfo.none : .noneSkipLast).rawValue)
+      else { return false }
+      context.draw(image, in: CGRect(x: 0, y: 0, width: facts.width, height: facts.height))
+      return true
+    }
+    guard drawn else { return false }
+    for pixel in 0..<coverage.count {
+      var masked = true
+      for component in 0..<components {
+        guard ranges[component].contains(Int(samples[pixel * channels + component])) else {
+          masked = false
+          break
+        }
+      }
+      if masked { coverage[pixel] = 0 }
+    }
+    return true
+  }
 
   /// The alpha channel a stream carries in `/SMask` or a stencil `/Mask`, as 0…255 coverage.
   private static func alphaChannel(of stream: PDFObject, resolver: ColorSpaceResolver)

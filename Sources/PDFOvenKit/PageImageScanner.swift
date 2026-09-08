@@ -363,7 +363,7 @@ enum FileType {
     else { return nil }
     return ImageFacts(
       width: image.width, height: image.height, bitsPerComponent: image.bitsPerComponent,
-      isMask: false, hasSoftMask: image.alphaInfo != .none)
+      isMask: false, transparency: image.alphaInfo == .none ? .none : .maskStream)
   }
 
   /// Strips everything that could make a name escape the output folder or hide there.
