@@ -230,7 +230,7 @@ enum ImageDecoder {
       }
       return grayImage(gray: [UInt8](repeating: 0, count: alpha.count), alpha: alpha, facts: facts)
     }
-    guard let space = colorSpace(of: stream, facts: facts, resolver: resolver) else { return nil }
+    guard let space = colorSpace(of: stream, resolver: resolver) else { return nil }
 
     switch space {
     case .indexed(let baseComponents, let palette, let highest):
@@ -269,7 +269,7 @@ enum ImageDecoder {
   }
 
   private static func colorSpace(
-    of stream: PDFObject, facts: ImageFacts, resolver: ColorSpaceResolver
+    of stream: PDFObject, resolver: ColorSpaceResolver
   ) -> ResolvedSpace? {
     guard var space = stream["ColorSpace"] ?? stream["CS"] else { return nil }
     // A bare name may be shorthand for an entry in the page's /ColorSpace resources.
@@ -495,7 +495,7 @@ enum ImageDecoder {
     stream: PDFObject, facts: ImageFacts, resolver: ColorSpaceResolver
   ) -> CGImage? {
     // A stencil paints one colour and has no components to compare.
-    guard !facts.isMask, let space = colorSpace(of: stream, facts: facts, resolver: resolver)
+    guard !facts.isMask, let space = colorSpace(of: stream, resolver: resolver)
     else { return nil }
     let components: Int
     switch space {
