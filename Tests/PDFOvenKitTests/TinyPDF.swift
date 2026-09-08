@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import XCTest
 
 @testable import PDFOvenKit
@@ -192,5 +193,45 @@ extension XCTestCase {
     let url = directory.appendingPathComponent("tiny.pdf")
     try pdf.serialized().write(to: url)
     return url
+  }
+}
+
+// MARK: - Reading a written image back
+
+/// The pixels of an image file, as premultiplied RGBA — which is all a bitmap context holds, so
+/// a masked-out pixel's colour is gone by design and only the opaque ones are worth comparing.
+struct Pixels {
+  let width: Int
+  let height: Int
+  let rgba: [UInt8]
+
+  /// The coverage of every pixel, one byte each in row order.
+  var alpha: [UInt8] { stride(from: 3, to: rgba.count, by: 4).map { rgba[$0] } }
+
+  /// The red, green and blue of one pixel.
+  func colour(at pixel: Int) -> [UInt8] {
+    Array(rgba[(pixel * 4)..<(pixel * 4 + 3)])
+  }
+}
+
+extension XCTestCase {
+  /// Draws an encoded image into a bitmap so its pixels can be counted by hand.
+  func pixels(of data: Data) throws -> Pixels {
+    let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    var rgba = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
+      guard
+        let context = CGContext(
+          data: buffer.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
+          bytesPerRow: image.width * 4,
+          space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+      else { return false }
+      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+      return true
+    }
+    XCTAssertTrue(drawn)
+    return Pixels(width: image.width, height: image.height, rgba: rgba)
   }
 }

@@ -1,6 +1,4 @@
-import CoreGraphics
 import Foundation
-import ImageIO
 import PDFOvenFixtures
 import XCTest
 
@@ -165,40 +163,10 @@ final class ImageColorKeyMaskTests: XCTestCase {
 
   // MARK: - Reading the result back
 
-  /// The pixels of the single PNG an extraction wrote, as premultiplied RGBA — which is all a
-  /// bitmap context holds, so a masked-out pixel's colour is gone by design and only the
-  /// opaque ones are worth comparing.
-  private struct Pixels {
-    let width: Int
-    let height: Int
-    let rgba: [UInt8]
-
-    var alpha: [UInt8] { stride(from: 3, to: rgba.count, by: 4).map { rgba[$0] } }
-
-    /// The red, green and blue of one pixel.
-    func colour(at pixel: Int) -> [UInt8] {
-      Array(rgba[(pixel * 4)..<(pixel * 4 + 3)])
-    }
-  }
-
+  /// The pixels of the single PNG an extraction wrote.
   private func onlyImage(of pdf: TinyPDF) throws -> Pixels {
     let files = try extractedFiles(of: pdf)
     XCTAssertEqual(files.count, 1)
-    let data = try XCTUnwrap(files.first).data
-    let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
-    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
-    var rgba = [UInt8](repeating: 0, count: image.width * image.height * 4)
-    let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
-      guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-        let context = CGContext(
-          data: buffer.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
-          bytesPerRow: image.width * 4, space: space,
-          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-      else { return false }
-      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-      return true
-    }
-    XCTAssertTrue(drawn)
-    return Pixels(width: image.width, height: image.height, rgba: rgba)
+    return try pixels(of: try XCTUnwrap(files.first).data)
   }
 }

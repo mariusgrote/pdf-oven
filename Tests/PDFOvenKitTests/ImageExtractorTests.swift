@@ -165,22 +165,7 @@ final class ImageExtractorTests: XCTestCase {
 
   /// The alpha of every pixel of a written PNG, row by row.
   private func alphaChannel(of url: URL) throws -> [UInt8] {
-    let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
-    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
-    var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
-    let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
-      guard
-        let context = CGContext(
-          data: buffer.baseAddress, width: image.width, height: image.height,
-          bitsPerComponent: 8, bytesPerRow: image.width * 4,
-          space: CGColorSpaceCreateDeviceRGB(),
-          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-      else { return false }
-      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-      return true
-    }
-    XCTAssertTrue(rendered)
-    return stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] }
+    try pixels(of: try Data(contentsOf: url)).alpha
   }
 
   private func makeFixture() throws -> (directory: URL, input: URL) {

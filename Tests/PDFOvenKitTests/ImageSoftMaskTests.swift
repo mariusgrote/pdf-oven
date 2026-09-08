@@ -1,6 +1,4 @@
-import CoreGraphics
 import Foundation
-import ImageIO
 import PDFOvenFixtures
 import XCTest
 
@@ -18,9 +16,11 @@ final class ImageSoftMaskTests: XCTestCase {
 
     // The mask is opaque on its left half, and smaller than the image it covers — which PDF
     // allows — so the edge between the halves is resampled and only the far sides are exact.
-    let alpha = try alphaChannel(ofPNG: decoded.data, width: 160, height: 120)
-    XCTAssertEqual(alpha[60 * 160 + 5], 255)
-    XCTAssertEqual(alpha[60 * 160 + 155], 0)
+    let image = try pixels(of: decoded.data)
+    XCTAssertEqual(image.width, 160)
+    XCTAssertEqual(image.height, 120)
+    XCTAssertEqual(image.alpha[60 * 160 + 5], 255)
+    XCTAssertEqual(image.alpha[60 * 160 + 155], 0)
   }
 
   /// The mask names eight samples and supplies three. Dropping to the rasterizer keeps the
@@ -98,26 +98,5 @@ final class ImageSoftMaskTests: XCTestCase {
       case .unreadable: return nil
       }
     }
-  }
-
-  /// The coverage of a PNG, one byte per pixel in row order.
-  private func alphaChannel(ofPNG data: Data, width: Int, height: Int) throws -> [UInt8] {
-    let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
-    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
-    XCTAssertEqual(image.width, width)
-    XCTAssertEqual(image.height, height)
-    var rgba = [UInt8](repeating: 0, count: width * height * 4)
-    let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
-      guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-        let context = CGContext(
-          data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
-          bytesPerRow: width * 4, space: space,
-          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-      else { return false }
-      context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-      return true
-    }
-    XCTAssertTrue(drawn)
-    return stride(from: 3, to: rgba.count, by: 4).map { rgba[$0] }
   }
 }
