@@ -82,19 +82,18 @@ final class PageImageScanner {
     let contentStream = pageContentStream
     if !scan(contentStream, ctm: .identity) {
       // The scanner gave up partway. Fall back to the resource dictionary for anything it
-      // missed.
+      // missed — unless the page has no readable dictionary either, in which case what the
+      // scan managed before it stopped is all there is.
       let seen = Set(found.compactMap(\.stream.identity))
-      dictionaryPass(
-        resources: PDFObject(dictionary: page.dictionary!)["Resources"], skipping: seen)
+      dictionaryPass(resources: PageImageScanner.resources(of: page.dictionary), skipping: seen)
     }
     return numbered(found)
   }
 
   /// Images carried by the page's annotations: stamp appearances, and image file attachments.
   func markupImages() -> (images: [ImageOccurrence], files: [FilePayload]) {
-    guard let annots = PDFObject(dictionary: page.dictionary!)["Annots"]?.array else {
-      return ([], [])
-    }
+    let annots = PageImageScanner.annotations(of: page.dictionary)
+    guard !annots.isEmpty else { return ([], []) }
     found = []
     var files: [FilePayload] = []
     for (index, annot) in annots.enumerated() {
@@ -113,6 +112,18 @@ final class PageImageScanner {
     }
     annotation = nil
     return (numbered(found), files)
+  }
+
+  /// `/Resources` of a page dictionary, for a handle CoreGraphics may not have been able to
+  /// read one out of. A page without a dictionary has no resources to fall back to.
+  static func resources(of pageDictionary: CGPDFDictionaryRef?) -> PDFObject? {
+    pageDictionary.flatMap { PDFObject(dictionary: $0)["Resources"] }
+  }
+
+  /// `/Annots` of the same, as an array. Empty for a page with no dictionary, and for one
+  /// whose `/Annots` is missing or is not an array.
+  static func annotations(of pageDictionary: CGPDFDictionaryRef?) -> [PDFObject] {
+    pageDictionary.flatMap { PDFObject(dictionary: $0)["Annots"]?.array } ?? []
   }
 
   /// Created once and kept alive: the resource objects it hands out point into it.
