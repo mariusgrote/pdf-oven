@@ -159,16 +159,7 @@ enum ImageDecoder {
     // rebuild. Both mean the pixels come out the way the document holds them.
     let rebuildsTransparency = !preferOriginalEncoding && facts.transparency != .none
 
-    // An `/SMask` or a `/Mask` stream is a picture of its own, so it is decoded first: an image
-    // whose transparency we cannot read is not one we can write.
     var alpha: CGImage?
-    if rebuildsTransparency, facts.transparency == .maskStream {
-      guard let decodedAlpha = alphaChannel(of: stream, resolver: resolver) else {
-        return .unreadable
-      }
-      alpha = decodedAlpha
-    }
-
     // Rung 1: the document already holds a real image file. Write those bytes verbatim —
     // original resolution, original chroma subsampling, no re-encode. A JPEG that needs
     // transparency bolted on cannot take this rung: the file format has nowhere to put it.
@@ -180,6 +171,15 @@ enum ImageDecoder {
         return .decoded(DecodedImage(data: data, fileExtension: "jp2"))
       default: break
       }
+    } else if facts.transparency == .maskStream {
+      // An `/SMask` or a `/Mask` stream is a picture of its own, so it is decoded before the
+      // pixels it covers: an image whose transparency we cannot read is not one we can write,
+      // and an opaque copy of it is not a substitute. Refusing here leaves it to the
+      // rasterizer, which paints the page with the transparency applied.
+      guard let decodedAlpha = alphaChannel(of: stream, resolver: resolver) else {
+        return .unreadable
+      }
+      alpha = decodedAlpha
     }
 
     // Rung 2: rebuild the pixels ourselves and write a PNG.
