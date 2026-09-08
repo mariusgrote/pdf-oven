@@ -35,7 +35,8 @@ public struct ExtractResult: Sendable {
   public let folder: URL
   /// Files written.
   public let written: Int
-  /// Images found but not written, including images removed by the size filters.
+  /// Images found but not written: those removed by the size filters, those nothing could
+  /// read, and every repeat that dedupe folded onto a file already written.
   public let skipped: Int
   /// Total size of everything written.
   public let bytes: Int
@@ -157,8 +158,10 @@ private final class Session {
     let facts = occurrence.facts
     let identity = occurrence.stream.identity
 
-    // A repeat of an image already dealt with needs no second file.
+    // A repeat of an image already dealt with needs no second file, but it is still an
+    // occurrence we found and did not write.
     if options.dedupe, let identity, handledStreams.contains(identity) {
+      skipped += 1
       return
     }
     guard facts.width >= options.minPixelSize, facts.height >= options.minPixelSize else {
@@ -195,6 +198,7 @@ private final class Session {
     // Two different XObjects can still hold the same picture.
     let key = contentKey(image.data, facts: facts)
     if options.dedupe, writtenContent.contains(key) {
+      skipped += 1
       markHandled(identity)
       return
     }
@@ -228,7 +232,10 @@ private final class Session {
     let facts = payload.facts
     let key =
       "file-\(digest)-\(facts?.width ?? 0)x\(facts?.height ?? 0)-\(facts?.bitsPerComponent ?? 0)"
-    if options.dedupe, writtenContent.contains(key) { return }
+    if options.dedupe, writtenContent.contains(key) {
+      skipped += 1
+      return
+    }
     let filename = unique(name(for: payload) + "." + payload.fileExtension)
     try write(payload.data, as: filename)
     writtenContent.insert(key)

@@ -4,37 +4,75 @@ import XCTest
 
 @testable import PDFOvenKit
 
-/// A one-page PDF that paints each of the given image XObjects once. Small enough to spell the
-/// syntax out, which is the point: these dictionaries say things no real producer says, either
-/// because they are hostile or because the pixels have to be countable by hand.
+/// A one-page PDF that paints each of the given image XObjects, plus any files it carries as
+/// attachments or document-level embedded files. Small enough to spell the syntax out, which is
+/// the point: these dictionaries say things no real producer says, either because they are
+/// hostile or because the pixels have to be countable by hand.
 struct TinyPDF {
   struct Image {
     let dictionary: String
     let data: Data
+    /// How often the page paints this one XObject. Every painting is an occurrence of its own;
+    /// only the file it produces is shared.
+    var paintings: Int = 1
+  }
+
+  /// An image file the document carries whole, either on a `/FileAttachment` annotation or in
+  /// the catalog's `/Names /EmbeddedFiles` tree.
+  struct File {
+    let name: String
+    let data: Data
   }
 
   let images: [Image]
+  var attachments: [File] = []
+  var embeddedFiles: [File] = []
 
   func serialized() -> Data {
     var content = ""
-    for index in images.indices {
-      content += "q 100 0 0 100 20 \(20 + index * 110) cm /Im\(index) Do Q\n"
+    var slot = 0
+    for (index, image) in images.enumerated() {
+      for _ in 0..<max(1, image.paintings) {
+        content += "q 100 0 0 100 20 \(20 + slot * 110) cm /Im\(index) Do Q\n"
+        slot += 1
+      }
     }
     let names = images.indices.map { "/Im\($0) \(5 + $0) 0 R" }.joined(separator: " ")
 
+    // Object numbers: catalog, pages, page, contents, one per image, then two per attachment
+    // (the embedded file stream and the annotation) and one per embedded file.
+    let firstAttachment = 5 + images.count
+    let firstEmbedded = firstAttachment + 2 * attachments.count
+    let annots = attachments.indices
+      .map { "\(firstAttachment + 2 * $0 + 1) 0 R" }
+      .joined(separator: " ")
+
     var bodies: [String: Data] = [:]
-    bodies["1"] = Data("<< /Type /Catalog /Pages 2 0 R >>".utf8)
+    bodies["1"] = Data("<< /Type /Catalog /Pages 2 0 R\(embeddedFileNames()) >>".utf8)
     bodies["2"] = Data("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".utf8)
     bodies["3"] = Data(
       ("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        + "/Resources << /XObject << \(names) >> >> >>").utf8)
+        + "/Resources << /XObject << \(names) >> >>"
+        + (annots.isEmpty ? "" : " /Annots [\(annots)]") + " >>").utf8)
     bodies["4"] = stream(dictionary: "", data: Data(content.utf8))
     for (index, image) in images.enumerated() {
       bodies["\(5 + index)"] = stream(
         dictionary: "/Type /XObject /Subtype /Image " + image.dictionary, data: image.data)
     }
+    for (index, file) in attachments.enumerated() {
+      let fileRef = firstAttachment + 2 * index
+      bodies["\(fileRef)"] = embeddedFile(file)
+      bodies["\(fileRef + 1)"] = Data(
+        ("<< /Type /Annot /Subtype /FileAttachment /Rect [300 500 320 520] /F 4 "
+          + "/FS \(filespec(file, stream: fileRef)) >>").utf8)
+    }
+    for (index, file) in embeddedFiles.enumerated() {
+      bodies["\(firstEmbedded + 2 * index)"] = embeddedFile(file)
+      bodies["\(firstEmbedded + 2 * index + 1)"] = Data(
+        filespec(file, stream: firstEmbedded + 2 * index).utf8)
+    }
 
-    let count = 5 + images.count
+    let count = firstEmbedded + 2 * embeddedFiles.count
     var output = Data("%PDF-1.7\n%\u{00E2}\u{00E3}\u{00CF}\u{00D3}\n".utf8)
     var offsets: [Int] = []
     for number in 1..<count {
@@ -51,6 +89,25 @@ struct TinyPDF {
     output.append(
       Data("trailer\n<< /Size \(count) /Root 1 0 R >>\nstartxref\n\(start)\n%%EOF\n".utf8))
     return output
+  }
+
+  /// The catalog's name tree, naming the filespec of every document-level embedded file.
+  private func embeddedFileNames() -> String {
+    guard !embeddedFiles.isEmpty else { return "" }
+    let firstEmbedded = 5 + images.count + 2 * attachments.count
+    let pairs = embeddedFiles.enumerated()
+      .map { "(\($1.name)) \(firstEmbedded + 2 * $0 + 1) 0 R" }
+      .joined(separator: " ")
+    return " /Names << /EmbeddedFiles << /Names [\(pairs)] >> >>"
+  }
+
+  private func filespec(_ file: File, stream number: Int) -> String {
+    "<< /Type /Filespec /F (\(file.name)) /UF (\(file.name)) "
+      + "/EF << /F \(number) 0 R >> >>"
+  }
+
+  private func embeddedFile(_ file: File) -> Data {
+    stream(dictionary: "/Type /EmbeddedFile", data: file.data)
   }
 
   private func stream(dictionary: String, data: Data) -> Data {
@@ -110,6 +167,22 @@ extension XCTestCase {
     return try files.sorted { $0.lastPathComponent < $1.lastPathComponent }.map {
       (name: $0.lastPathComponent, data: try Data(contentsOf: $0))
     }
+  }
+
+  /// Runs a full extraction with the size filters turned down and markup included, so every
+  /// skip it counts is a decision about duplicates rather than about size. The output folder
+  /// goes away with the temporary directory, so its files come back by name.
+  func extraction(of pdf: TinyPDF, dedupe: Bool = true) throws
+    -> (result: ExtractResult, files: [String])
+  {
+    let url = try writeTemporary(pdf)
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let options = ExtractOptions(dedupe: dedupe, minPixelSize: 1, minByteSize: 1)
+    let result = try ImageExtractor(extractOptions: options).extract(url, options: Options())
+    let files = try FileManager.default.contentsOfDirectory(
+      at: result.folder, includingPropertiesForKeys: nil
+    ).map(\.lastPathComponent).sorted()
+    return (result, files)
   }
 
   func writeTemporary(_ pdf: TinyPDF) throws -> URL {

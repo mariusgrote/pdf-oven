@@ -13,7 +13,8 @@ final class ImageExtractorTests: XCTestCase {
     let result = try ImageExtractor().extract(fixture.input, options: Options())
 
     XCTAssertEqual(result.written, FixturePDF.Expectation.writtenFiles)
-    XCTAssertEqual(result.skipped, 1)
+    // The 4x4 spacer, and the two repeats of the logo that dedupe folds onto its first file.
+    XCTAssertEqual(result.skipped, 3)
 
     let files = try FileManager.default.contentsOfDirectory(
       at: result.folder, includingPropertiesForKeys: nil)
@@ -63,6 +64,8 @@ final class ImageExtractorTests: XCTestCase {
 
     // Every page image, the repeated logo among them; the stamp and the attachment are not.
     XCTAssertEqual(result.written, 9)
+    // Without dedupe no repeat is folded away, so the spacer is the only skip.
+    XCTAssertEqual(result.skipped, 1)
     let files = try FileManager.default.contentsOfDirectory(
       at: result.folder, includingPropertiesForKeys: nil)
     XCTAssertFalse(files.contains { $0.lastPathComponent.contains("-stamp.") })
@@ -87,8 +90,8 @@ final class ImageExtractorTests: XCTestCase {
     XCTAssertEqual(result.written, try countFiles(in: result.folder))
   }
 
-  /// With dedupe the same three paintings collapse onto the first one's file, and the pages
-  /// behind it contribute nothing — no second file, no bump in either counter.
+  /// With dedupe the same three paintings collapse onto the first one's file: the pages behind
+  /// it write nothing, and each repeat counts as a skip where it was found.
   func testRepeatedStreamIsWrittenOnceWithDedupe() throws {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -105,10 +108,10 @@ final class ImageExtractorTests: XCTestCase {
       XCTAssertFalse(files.contains(repeated), "\(repeated) is a repeat of \(names[0])")
     }
 
-    // The nine page images of the no-dedupe run minus the logo's two repeats; the 4x4
-    // spacer is the one skip either way.
+    // The nine page images of the no-dedupe run minus the logo's two repeats, which join the
+    // 4x4 spacer among the skips.
     XCTAssertEqual(result.written, 7)
-    XCTAssertEqual(result.skipped, 1)
+    XCTAssertEqual(result.skipped, 3)
     XCTAssertEqual(files.count, result.written)
   }
 
