@@ -135,8 +135,6 @@ private final class Session {
   private let options: ExtractOptions
   /// Content hashes of written files, for dedupe.
   private var writtenContent: Set<String> = []
-  /// XObject identity to its decode outcome, so a logo on 50 pages decodes once.
-  private var byStream: [Int: DecodeOutcome] = [:]
   /// XObjects already handled, so repeated uses do not produce another file.
   private var handledStreams: Set<Int> = []
   private var usedNames: Set<String> = []
@@ -169,7 +167,9 @@ private final class Session {
       return
     }
 
-    let outcome = decode(occurrence)
+    let outcome = ImageDecoder.decode(
+      occurrence.stream, facts: facts, resolver: occurrence.resolveColorSpace,
+      preferOriginalEncoding: options.preferOriginalEncoding)
     var image: DecodedImage
     switch outcome {
     case .decoded(let decoded):
@@ -203,15 +203,6 @@ private final class Session {
     try write(image.data, as: filename)
     markHandled(identity)
     writtenContent.insert(key)
-  }
-
-  private func decode(_ occurrence: ImageOccurrence) -> DecodeOutcome {
-    if let identity = occurrence.stream.identity, let cached = byStream[identity] { return cached }
-    let outcome = ImageDecoder.decode(
-      occurrence.stream, facts: occurrence.facts, resolver: occurrence.resolveColorSpace,
-      preferOriginalEncoding: options.preferOriginalEncoding)
-    if let identity = occurrence.stream.identity { byStream[identity] = outcome }
-    return outcome
   }
 
   /// Distinct image objects can still decode to the same bytes.

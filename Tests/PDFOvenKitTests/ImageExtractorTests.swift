@@ -69,6 +69,53 @@ final class ImageExtractorTests: XCTestCase {
     XCTAssertFalse(files.contains { $0.lastPathComponent.contains("-attach-") })
   }
 
+  /// The fixture paints one logo XObject on three pages. Without dedupe every painting is a
+  /// file of its own, named after the page and the position it was painted in.
+  func testRepeatedStreamIsWrittenOncePerOccurrenceWithoutDedupe() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let options = ExtractOptions(includeMarkup: false, dedupe: false)
+    let result = try ImageExtractor(extractOptions: options).extract(
+      fixture.input, options: Options())
+
+    let logos = try FixturePDF.logoOccurrenceNames.map {
+      try Data(contentsOf: result.folder.appendingPathComponent($0))
+    }
+    XCTAssertEqual(logos.count, 3)
+    // Decoding each occurrence separately has to give the same file every time.
+    XCTAssertEqual(Set(logos).count, 1)
+    XCTAssertEqual(result.written, try countFiles(in: result.folder))
+  }
+
+  /// With dedupe the same three paintings collapse onto the first one's file, and the pages
+  /// behind it contribute nothing — no second file, no bump in either counter.
+  func testRepeatedStreamIsWrittenOnceWithDedupe() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let options = ExtractOptions(includeMarkup: false, dedupe: true)
+    let result = try ImageExtractor(extractOptions: options).extract(
+      fixture.input, options: Options())
+
+    let files = try FileManager.default.contentsOfDirectory(
+      at: result.folder, includingPropertiesForKeys: nil
+    ).map(\.lastPathComponent)
+    let names = FixturePDF.logoOccurrenceNames
+    XCTAssertTrue(files.contains(names[0]), "the first painting keeps its own name")
+    for repeated in names.dropFirst() {
+      XCTAssertFalse(files.contains(repeated), "\(repeated) is a repeat of \(names[0])")
+    }
+
+    // The nine page images of the no-dedupe run minus the logo's two repeats; the 4x4
+    // spacer is the one skip either way.
+    XCTAssertEqual(result.written, 7)
+    XCTAssertEqual(result.skipped, 1)
+    XCTAssertEqual(files.count, result.written)
+  }
+
+  private func countFiles(in folder: URL) throws -> Int {
+    try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).count
+  }
+
   func testImagesFolderNeverContainsAnInput() throws {
     let fixture = try makeFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

@@ -31,6 +31,10 @@ public enum FixturePDF {
     public static let colorKeyTransparentPixels = softMaskSize * softMaskSize / 2
   }
 
+  /// The files the one logo XObject produces when every painting of it is written: it is the
+  /// third image on page 1, the fourth on page 2 and the first on page 3.
+  public static let logoOccurrenceNames = ["p001-03.png", "p002-04.png", "p003-01.png"]
+
   public static func data() -> Data {
     let builder = Builder()
     let side = Expectation.softMaskSize
