@@ -18,6 +18,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Run tests
+        run: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
       - name: Build package
         run: swift build -c release
       - name: Assemble app bundle

@@ -4,6 +4,9 @@ A small native macOS app that "bakes" PDFs: every page is re-drawn into a fresh 
 annotations (highlights, notes, ink, stamps, form fields) become part of the page content
 and can no longer be selected, moved, or edited.
 
+It can also extract the image files stored inside a PDF, including images used by stamp
+annotations and image file attachments.
+
 ## Build
 
 ```sh
@@ -25,6 +28,7 @@ if you want it permanently.
 
 - Drag PDFs (or folders of PDFs) onto the window, or press ⌘O.
 - Each file is saved next to the original as `name-baked.pdf`.
+- Use the Extract Images toolbar button or press ⌘E to write images to `name-images/`.
 - ⌘, opens Settings: filename suffix, a fixed output folder, whether to replace an existing
   file of the same name, and whether to reveal results in Finder.
 - The app registers as a PDF handler, so you can also drop files on its Dock icon or use
@@ -44,6 +48,28 @@ new document is written from drawing commands only, so it contains no annotation
   with an error rather than being unlocked.
 
 Originals are never modified.
+
+## Extract images from the command line
+
+```sh
+swift run PDFOvenCLI extract [--out DIR] [--min-size 32] [--no-dedupe] \
+  [--no-markup] file.pdf ...
+```
+
+The extractor keeps stored JPEG and JPEG 2000 bytes when possible and reconstructs other
+pixel data as PNG. By default it deduplicates repeated images and drops images smaller than
+32 pixels in either direction or 1 KB after encoding.
+
+It includes page image XObjects, stamp appearances, image file attachments, and images in the
+document's embedded-file name tree. Inline images inside page content (`BI … ID … EI`) are not
+supported. Ink, highlights, squares, text annotations, and other non-image markup produce no
+output.
+
+Every path is checked before anything is written: one that does not exist, a file that is not
+a PDF, or a folder holding no PDFs ends the call with exit status 2 and no output at all, so a
+mistyped argument cannot leave a half-finished run behind. A PDF that exists but cannot be
+opened is a failure of the run, not of the call: the other inputs are still extracted and the
+exit status is 1.
 
 ## Contributing
 

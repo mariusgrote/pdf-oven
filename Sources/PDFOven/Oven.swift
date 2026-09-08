@@ -32,19 +32,32 @@ enum Preference {
 }
 
 struct BakeItem: Identifiable {
+  enum Action: Equatable, Sendable {
+    case bake
+    case extract
+
+    var workingLabel: String {
+      switch self {
+      case .bake: return "Baking…"
+      case .extract: return "Extracting…"
+      }
+    }
+  }
+
   enum Status: Equatable {
     case waiting
-    case baking
-    case done(URL)
+    case working
+    case done(URL, String)
     case failed(String)
   }
 
   let id = UUID()
   let input: URL
+  let action: Action
   var status: Status = .waiting
 
   var outputURL: URL? {
-    if case .done(let url) = status { return url }
+    if case .done(let url, _) = status { return url }
     return nil
   }
 }
@@ -60,7 +73,7 @@ final class Oven: ObservableObject {
   private var drain: Task<Void, Never>?
 
   var isBaking: Bool {
-    items.contains { $0.status == .waiting || $0.status == .baking }
+    items.contains { $0.status == .waiting || $0.status == .working }
   }
 
   func clear() {
@@ -69,51 +82,70 @@ final class Oven: ObservableObject {
   }
 
   /// Accepts files and folders; folders are searched (one level deep and below) for PDFs.
-  func add(_ urls: [URL]) {
+  func add(_ urls: [URL], action: BakeItem.Action = .bake) {
     let pdfs = urls.flatMap(Destination.expand(_:)).filter { url in
-      !items.contains { $0.input == url }
+      !items.contains { $0.input == url && $0.action == action }
     }
     guard !pdfs.isEmpty else { return }
-    items.append(contentsOf: pdfs.map { BakeItem(input: $0) })
+    items.append(contentsOf: pdfs.map { BakeItem(input: $0, action: action) })
 
     let previous = drain
     drain = Task { [weak self] in
       await previous?.value
-      await self?.bakePending()
+      await self?.processPending()
     }
   }
 
-  private func bakePending() async {
+  func extract(_ urls: [URL]) { add(urls, action: .extract) }
+
+  private func processPending() async {
     let options = Preference.options
     let reveal = UserDefaults.standard.bool(forKey: Preference.revealWhenDone)
 
     while let index = items.firstIndex(where: { $0.status == .waiting }) {
+      let itemID = items[index].id
       let input = items[index].input
-      items[index].status = .baking
+      let action = items[index].action
+      items[index].status = .working
       // Every file still in the list is an input of this run and must not be written over.
       let protected = items.map(\.input)
-      let result = await Task.detached(priority: .userInitiated) { () -> Result<URL, Error> in
+      let result = await Task.detached(priority: .userInitiated) {
+        () -> Result<(URL, String), Error> in
         do {
-          let output = Destination.destination(
-            for: input,
-            suffix: options.suffix,
-            folder: options.folder,
-            replace: options.replace,
-            protecting: protected
-          )
-          try Baker.bake(input: input, to: output)
-          return .success(output)
+          switch action {
+          case .bake:
+            let output = Destination.destination(
+              for: input,
+              suffix: options.suffix,
+              folder: options.folder,
+              replace: options.replace,
+              protecting: protected
+            )
+            try Baker.bake(input: input, to: output)
+            return .success((output, output.lastPathComponent))
+          case .extract:
+            let extracted = try ImageExtractor().extract(
+              input, options: options, protecting: protected)
+            var detail =
+              "\(extracted.written) image\(extracted.written == 1 ? "" : "s") · "
+              + ByteCountFormatter.string(
+                fromByteCount: Int64(extracted.bytes), countStyle: .file)
+            if extracted.skipped > 0 { detail += " · \(extracted.skipped) skipped" }
+            return .success((extracted.folder, detail))
+          }
         } catch {
           return .failure(error)
         }
       }.value
 
-      guard let current = items.firstIndex(where: { $0.input == input }) else { continue }
+      // The same file can be queued twice — once to bake, once to extract — so the entry is
+      // found again by its id; matching on the input alone would update the wrong one.
+      guard let current = items.firstIndex(where: { $0.id == itemID }) else { continue }
       switch result {
-      case .success(let url):
-        items[current].status = .done(url)
+      case .success(let completion):
+        items[current].status = .done(completion.0, completion.1)
         if reveal {
-          NSWorkspace.shared.activateFileViewerSelecting([url])
+          NSWorkspace.shared.activateFileViewerSelecting([completion.0])
         }
       case .failure(let error):
         items[current].status = .failed(error.localizedDescription)

@@ -34,6 +34,14 @@ struct ContentView: View {
         }
         .help("Open PDFs to bake")
       }
+      ToolbarItem(placement: .primaryAction) {
+        Button {
+          oven.extract(FilePicker.chooseExtractInputs())
+        } label: {
+          Label("Extract Images", systemImage: "photo.on.rectangle.angled")
+        }
+        .help("Extract embedded images from PDFs")
+      }
       ToolbarItem {
         Button {
           oven.clear()
@@ -113,7 +121,7 @@ private struct BakeRow: View {
     switch item.status {
     case .waiting:
       Image(systemName: "clock").foregroundStyle(.secondary)
-    case .baking:
+    case .working:
       ProgressView().controlSize(.small)
     case .done:
       Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -130,8 +138,8 @@ private struct BakeRow: View {
   private var subtitle: String {
     switch item.status {
     case .waiting: return "Waiting"
-    case .baking: return "Baking…"
-    case .done(let url): return url.lastPathComponent
+    case .working: return item.action.workingLabel
+    case .done(_, let detail): return detail
     case .failed(let message): return message
     }
   }
