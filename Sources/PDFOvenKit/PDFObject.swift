@@ -10,14 +10,12 @@ struct PDFObject {
   private enum Storage {
     case object(CGPDFObjectRef)
     case dictionary(CGPDFDictionaryRef)
-    case stream(CGPDFStreamRef)
   }
 
   private let storage: Storage
 
   init(_ object: CGPDFObjectRef) { storage = .object(object) }
   init(dictionary: CGPDFDictionaryRef) { storage = .dictionary(dictionary) }
-  init(stream: CGPDFStreamRef) { storage = .stream(stream) }
 
   /// Looks a key up in this object's dictionary. Stream objects are looked up in their own
   /// dictionary, so `stream["/Width"]` reads the way the PDF spec talks about it.
@@ -31,7 +29,6 @@ struct PDFObject {
   var dictionary: CGPDFDictionaryRef? {
     switch storage {
     case .dictionary(let dictionary): return dictionary
-    case .stream(let stream): return CGPDFStreamGetDictionary(stream)
     case .object(let object):
       var value: CGPDFDictionaryRef?
       if CGPDFObjectGetValue(object, .dictionary, &value) { return value }
@@ -42,7 +39,6 @@ struct PDFObject {
 
   var stream: CGPDFStreamRef? {
     switch storage {
-    case .stream(let stream): return stream
     case .dictionary: return nil
     case .object(let object):
       var value: CGPDFStreamRef?
