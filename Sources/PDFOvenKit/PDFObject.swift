@@ -73,9 +73,13 @@ struct PDFObject {
     guard case .object(let object) = storage else { return nil }
     var value: CGPDFInteger = 0
     if CGPDFObjectGetValue(object, .integer, &value) { return Int(value) }
-    // Producers do write `/Width 612.0`; take the number rather than reject the image.
+    // Producers do write `/Width 612.0`; take the number rather than reject the image. A real
+    // no `Int` can hold — `1e26`, an infinity, a NaN — is not one of those; converting it would
+    // trap, so it counts as no number at all and the caller rejects the image.
     var approximate: CGPDFReal = 0
-    if CGPDFObjectGetValue(object, .real, &approximate) { return Int(approximate) }
+    if CGPDFObjectGetValue(object, .real, &approximate) {
+      return Int(exactly: approximate.rounded(.towardZero))
+    }
     return nil
   }
 
