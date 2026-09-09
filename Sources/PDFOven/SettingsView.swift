@@ -1,3 +1,4 @@
+import PDFOvenKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -5,9 +6,31 @@ struct SettingsView: View {
   @AppStorage(Preference.destinationFolder) private var destinationFolder = ""
   @AppStorage(Preference.replaceExisting) private var replaceExisting = false
   @AppStorage(Preference.revealWhenDone) private var revealWhenDone = false
+  @AppStorage(Preference.flatteningMethod) private var flatteningMethod =
+    FlatteningMethod.redraw.rawValue
+  @AppStorage(Preference.optimize) private var optimize = false
+
+  private var selectedMethod: FlatteningMethod {
+    FlatteningMethod(rawValue: flatteningMethod) ?? .redraw
+  }
 
   var body: some View {
     Form {
+      Picker("Flattening method:", selection: $flatteningMethod) {
+        ForEach(FlatteningMethod.allCases, id: \.rawValue) { method in
+          Text(method.title).tag(method.rawValue)
+        }
+      }
+      Text(selectedMethod.explanation)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      Toggle("Losslessly optimize file size after baking", isOn: $optimize)
+      Text("Recompresses PDF data without converting or downsampling images.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+
+      Divider()
+
       TextField("Filename suffix:", text: $suffix, prompt: Text(Preference.defaultSuffix))
         .frame(width: 160)
       LabeledContent("Save to:") {
@@ -37,7 +60,30 @@ struct SettingsView: View {
       }
     }
     .formStyle(.grouped)
-    .frame(width: 460)
+    .frame(width: 520)
+  }
+}
+
+extension FlatteningMethod {
+  fileprivate var title: String {
+    switch self {
+    case .preserveContent: return "Flatten into page content (qpdf)"
+    case .pdfKit: return "Native macOS burn-in (PDFKit)"
+    case .redraw: return "Compatibility redraw (PDFKit)"
+    }
+  }
+
+  fileprivate var explanation: String {
+    switch self {
+    case .preserveContent:
+      return
+        "Adds annotation appearances to the existing page content without redrawing the full page."
+    case .pdfKit:
+      return "Uses macOS to bake annotations into page content. File size may increase."
+    case .redraw:
+      return
+        "The original PDF Oven method. Draws every page into a new PDF and may make drawings much larger."
+    }
   }
 }
 

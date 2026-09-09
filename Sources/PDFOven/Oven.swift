@@ -9,6 +9,8 @@ enum Preference {
   static let destinationFolder = "destinationFolderPath"
   static let replaceExisting = "replaceExisting"
   static let revealWhenDone = "revealWhenDone"
+  static let flatteningMethod = "flatteningMethod"
+  static let optimize = "optimize"
 
   static var defaultSuffix: String { Destination.defaultSuffix }
 
@@ -17,6 +19,8 @@ enum Preference {
       suffix: defaultSuffix,
       replaceExisting: false,
       revealWhenDone: false,
+      flatteningMethod: FlatteningMethod.redraw.rawValue,
+      optimize: false,
     ])
   }
 
@@ -29,6 +33,28 @@ enum Preference {
       replace: defaults.bool(forKey: replaceExisting)
     )
   }
+
+  static var bakeOptions: BakeOptions {
+    let defaults = UserDefaults.standard
+    let method =
+      defaults.string(forKey: flatteningMethod)
+      .flatMap(FlatteningMethod.init(rawValue:)) ?? .redraw
+    return BakeOptions(method: method, optimize: defaults.bool(forKey: optimize))
+  }
+
+  static var snapshot: RunPreferences {
+    RunPreferences(
+      destination: options,
+      bake: bakeOptions,
+      reveal: UserDefaults.standard.bool(forKey: revealWhenDone)
+    )
+  }
+}
+
+struct RunPreferences: Sendable {
+  let destination: Options
+  let bake: BakeOptions
+  let reveal: Bool
 }
 
 struct BakeItem: Identifiable {
@@ -54,6 +80,7 @@ struct BakeItem: Identifiable {
   let id = UUID()
   let input: URL
   let action: Action
+  let preferences: RunPreferences
   var status: Status = .waiting
 
   var outputURL: URL? {
@@ -87,7 +114,11 @@ final class Oven: ObservableObject {
       !items.contains { $0.input == url && $0.action == action }
     }
     guard !pdfs.isEmpty else { return }
-    items.append(contentsOf: pdfs.map { BakeItem(input: $0, action: action) })
+    let preferences = Preference.snapshot
+    items.append(
+      contentsOf: pdfs.map {
+        BakeItem(input: $0, action: action, preferences: preferences)
+      })
 
     let previous = drain
     drain = Task { [weak self] in
@@ -99,13 +130,11 @@ final class Oven: ObservableObject {
   func extract(_ urls: [URL]) { add(urls, action: .extract) }
 
   private func processPending() async {
-    let options = Preference.options
-    let reveal = UserDefaults.standard.bool(forKey: Preference.revealWhenDone)
-
     while let index = items.firstIndex(where: { $0.status == .waiting }) {
       let itemID = items[index].id
       let input = items[index].input
       let action = items[index].action
+      let preferences = items[index].preferences
       items[index].status = .working
       // Every file still in the list is an input of this run and must not be written over.
       let protected = items.map(\.input)
@@ -116,16 +145,22 @@ final class Oven: ObservableObject {
           case .bake:
             let output = Destination.destination(
               for: input,
-              suffix: options.suffix,
-              folder: options.folder,
-              replace: options.replace,
+              suffix: preferences.destination.suffix,
+              folder: preferences.destination.folder,
+              replace: preferences.destination.replace,
               protecting: protected
             )
-            try Baker.bake(input: input, to: output)
-            return .success((output, output.lastPathComponent))
+            let baked = try Baker.bake(input: input, to: output, options: preferences.bake)
+            var detail =
+              ByteCountFormatter.string(fromByteCount: Int64(baked.inputBytes), countStyle: .file)
+              + " → "
+              + ByteCountFormatter.string(
+                fromByteCount: Int64(baked.outputBytes), countStyle: .file)
+            if baked.usedOptimizedFile { detail += " · optimized" }
+            return .success((output, detail))
           case .extract:
             let extracted = try ImageExtractor().extract(
-              input, options: options, protecting: protected)
+              input, options: preferences.destination, protecting: protected)
             var detail =
               "\(extracted.written) image\(extracted.written == 1 ? "" : "s") · "
               + ByteCountFormatter.string(
@@ -144,7 +179,7 @@ final class Oven: ObservableObject {
       switch result {
       case .success(let completion):
         items[current].status = .done(completion.0, completion.1)
-        if reveal {
+        if preferences.reveal {
           NSWorkspace.shared.activateFileViewerSelecting([completion.0])
         }
       case .failure(let error):

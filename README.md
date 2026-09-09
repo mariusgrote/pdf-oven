@@ -1,8 +1,7 @@
 # PDF Oven
 
-A small native macOS app that "bakes" PDFs: every page is re-drawn into a fresh PDF, so
-annotations (highlights, notes, ink, stamps, form fields) become part of the page content
-and can no longer be selected, moved, or edited.
+A small native macOS app that "bakes" PDF annotations into page content so they can no
+longer be selected, moved, or edited.
 
 It can also extract the image files stored inside a PDF, including images used by stamp
 annotations and image file attachments.
@@ -20,25 +19,48 @@ open "build/PDF Oven.app"
 The app icon is generated, not hand-drawn: `swift Tools/make-icon.swift` redraws
 `Packaging/AppIcon.icns` from CoreGraphics primitives. Only rerun it if you change the design.
 
-Requires the Swift toolchain from Xcode or the Command Line Tools; no Xcode project needed.
-The script assembles `build/PDF Oven.app` and ad-hoc signs it. Move it to `/Applications`
-if you want it permanently.
+Building requires the Swift toolchain from Xcode or the Command Line Tools plus CMake; no
+Xcode project is needed. The script assembles `build/PDF Oven.app` and ad-hoc signs it. Move
+it to `/Applications` if you want it permanently.
+
+The build downloads pinned qpdf and libjpeg-turbo source archives, verifies their checksums,
+and compiles a self-contained qpdf helper. The helper and dependency licenses are included in
+the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another runtime install.
 
 ## Use
 
 - Drag PDFs (or folders of PDFs) onto the window, or press ⌘O.
 - Each file is saved next to the original as `name-baked.pdf`.
 - Use the Extract Images toolbar button or press ⌘E to write images to `name-images/`.
-- ⌘, opens Settings: filename suffix, a fixed output folder, whether to replace an existing
-  file of the same name, and whether to reveal results in Finder.
+- ⌘, opens Settings: baking method, optional lossless optimization, filename suffix, a fixed
+  output folder, whether to replace an existing file of the same name, and whether to reveal
+  results in Finder.
 - The app registers as a PDF handler, so you can also drop files on its Dock icon or use
   "Open With".
 
 ## How the baking works
 
-`Baker.bake` opens the document with PDFKit and draws each page into a new `CGPDFContext`.
-`PDFPage.draw(with:to:)` renders annotation appearances along with the page content, and the
-new document is written from drawing commands only, so it contains no annotation objects.
+The compatibility redraw remains the default. `Baker.bake` opens the document with PDFKit
+and draws each page into a new `CGPDFContext`. `PDFPage.draw(with:to:)` renders annotation
+appearances along with page content, and the new document contains no annotation objects.
+
+Settings also offers two methods for comparing output on a particular document:
+
+- Native macOS burn-in uses PDFKit's annotation burn-in write option.
+- qpdf flattening inserts existing annotation appearance streams into the page content without
+  redrawing the full page.
+
+Both methods preserve vector content in the synthetic test fixture without introducing image
+objects. That result is evidence for the fixture, not a guarantee for every PDF producer or
+annotation type. PDF Oven rejects visible annotations that have no selected appearance stream
+and forms marked with stale appearances rather than risk dropping or baking the wrong content.
+An unmarked stale appearance cannot be detected reliably from the PDF structure.
+
+Lossless optimization is independent of the baking method. qpdf recompresses PDF streams and
+generates object streams without converting or downsampling images. PDF Oven keeps the
+optimized copy only when it is smaller.
+
+The following behavior describes the compatibility redraw:
 
 - Text stays real text (searchable and selectable), including text inside note annotations.
 - Page rotation and offset crop boxes are baked into the output geometry.
