@@ -32,7 +32,7 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
 - Drag PDFs (or folders of PDFs) onto the window, or press ⌘O.
 - Each file is saved next to the original as `name-baked.pdf`.
 - Use the Extract Images toolbar button or press ⌘E to write images to `name-images/`.
-- ⌘, opens Settings: baking method, optional lossless optimization, filename suffix, a fixed
+- ⌘, opens Settings: baking method, optional lossless qpdf compression, filename suffix, a fixed
   output folder, whether to replace an existing file of the same name, and whether to reveal
   results in Finder.
 - The app registers as a PDF handler, so you can also drop files on its Dock icon or use
@@ -56,9 +56,9 @@ annotation type. PDF Oven rejects visible annotations that have no selected appe
 and forms marked with stale appearances rather than risk dropping or baking the wrong content.
 An unmarked stale appearance cannot be detected reliably from the PDF structure.
 
-Lossless optimization is independent of the baking method. qpdf recompresses PDF streams and
-generates object streams without converting or downsampling images. PDF Oven keeps the
-optimized copy only when it is smaller.
+Lossless qpdf compression is independent of the baking method. qpdf recompresses Flate streams
+at compression level 9 and generates object streams. It never converts or downsamples images.
+PDF Oven keeps the compressed copy only when it is smaller.
 
 The following behavior describes the compatibility redraw:
 

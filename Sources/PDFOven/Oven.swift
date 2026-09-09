@@ -156,7 +156,7 @@ final class Oven: ObservableObject {
               + " → "
               + ByteCountFormatter.string(
                 fromByteCount: Int64(baked.outputBytes), countStyle: .file)
-            if baked.usedOptimizedFile { detail += " · optimized" }
+            if baked.usedOptimizedFile { detail += " · losslessly compressed" }
             return .success((output, detail))
           case .extract:
             let extracted = try ImageExtractor().extract(

@@ -24,8 +24,10 @@ struct SettingsView: View {
       Text(selectedMethod.explanation)
         .font(.caption)
         .foregroundStyle(.secondary)
-      Toggle("Losslessly optimize file size after baking", isOn: $optimize)
-      Text("Recompresses PDF data without converting or downsampling images.")
+      Toggle("Losslessly compress with qpdf after baking", isOn: $optimize)
+      Text(
+        "Recompresses Flate streams and packs PDF objects. Images are never converted or downsampled."
+      )
         .font(.caption)
         .foregroundStyle(.secondary)
 
