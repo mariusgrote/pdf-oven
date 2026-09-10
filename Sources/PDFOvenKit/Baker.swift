@@ -640,30 +640,49 @@ private struct QPDF {
 
   @discardableResult
   private func run(_ arguments: [String]) throws -> Data {
-    let diagnostics = FileManager.default.temporaryDirectory
-      .appendingPathComponent("pdfoven-qpdf-\(UUID().uuidString).log")
-    FileManager.default.createFile(atPath: diagnostics.path, contents: nil)
-    defer { try? FileManager.default.removeItem(at: diagnostics) }
+    let token = UUID().uuidString
+    let stdout = FileManager.default.temporaryDirectory
+      .appendingPathComponent("pdfoven-qpdf-\(token).stdout")
+    let stderr = FileManager.default.temporaryDirectory
+      .appendingPathComponent("pdfoven-qpdf-\(token).stderr")
+    FileManager.default.createFile(atPath: stdout.path, contents: nil)
+    FileManager.default.createFile(atPath: stderr.path, contents: nil)
+    defer {
+      try? FileManager.default.removeItem(at: stdout)
+      try? FileManager.default.removeItem(at: stderr)
+    }
 
     do {
-      let file = try FileHandle(forWritingTo: diagnostics)
-      defer { try? file.close() }
+      let outputFile = try FileHandle(forWritingTo: stdout)
+      let errorFile = try FileHandle(forWritingTo: stderr)
+      defer {
+        try? outputFile.close()
+        try? errorFile.close()
+      }
       let process = Process()
       process.executableURL = executable
       process.arguments = arguments
-      process.standardOutput = file
-      process.standardError = file
+      process.standardOutput = outputFile
+      process.standardError = errorFile
       try process.run()
       process.waitUntilExit()
-      guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-        try? file.synchronize()
-        let message =
-          (try? String(contentsOf: diagnostics, encoding: .utf8))?
+      try outputFile.synchronize()
+      try errorFile.synchronize()
+      // qpdf uses status 3 for a completed operation with recoverable warnings.
+      // The caller validates every produced PDF before installing it.
+      guard process.terminationReason == .exit,
+        process.terminationStatus == 0 || process.terminationStatus == 3
+      else {
+        let errors =
+          (try? String(contentsOf: stderr, encoding: .utf8))?
           .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let output =
+          (try? String(contentsOf: stdout, encoding: .utf8))?
+          .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let message = errors.isEmpty ? output : errors
         throw BakeError.qpdfFailed(process.terminationStatus, message)
       }
-      try file.synchronize()
-      return try Data(contentsOf: diagnostics)
+      return try Data(contentsOf: stdout)
     } catch let error as BakeError {
       throw error
     } catch {
