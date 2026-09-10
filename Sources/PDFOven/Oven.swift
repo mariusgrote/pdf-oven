@@ -11,6 +11,7 @@ enum Preference {
   static let revealWhenDone = "revealWhenDone"
   static let flatteningMethod = "flatteningMethod"
   static let optimize = "optimize"
+  static let preserveLinks = "preserveLinks"
 
   static var defaultSuffix: String { Destination.defaultSuffix }
 
@@ -21,6 +22,7 @@ enum Preference {
       revealWhenDone: false,
       flatteningMethod: FlatteningMethod.redraw.rawValue,
       optimize: false,
+      preserveLinks: true,
     ])
   }
 
@@ -39,7 +41,10 @@ enum Preference {
     let method =
       defaults.string(forKey: flatteningMethod)
       .flatMap(FlatteningMethod.init(rawValue:)) ?? .redraw
-    return BakeOptions(method: method, optimize: defaults.bool(forKey: optimize))
+    return BakeOptions(
+      method: method, optimize: defaults.bool(forKey: optimize),
+      preserveLinks: defaults.object(forKey: preserveLinks) as? Bool ?? true
+    )
   }
 
   static var snapshot: RunPreferences {
@@ -75,6 +80,13 @@ struct BakeItem: Identifiable {
     case working
     case done(URL, String)
     case failed(String)
+
+    var isPending: Bool {
+      switch self {
+      case .waiting, .working: return true
+      case .done, .failed: return false
+      }
+    }
   }
 
   let id = UUID()
@@ -111,7 +123,9 @@ final class Oven: ObservableObject {
   /// Accepts files and folders; folders are searched (one level deep and below) for PDFs.
   func add(_ urls: [URL], action: BakeItem.Action = .bake) {
     let pdfs = urls.flatMap(Destination.expand(_:)).filter { url in
-      !items.contains { $0.input == url && $0.action == action }
+      !items.contains {
+        $0.input == url && $0.action == action && $0.status.isPending
+      }
     }
     guard !pdfs.isEmpty else { return }
     let preferences = Preference.snapshot

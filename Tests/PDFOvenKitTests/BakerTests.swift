@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import PDFKit
 import XCTest
 
 @testable import PDFOvenKit
@@ -8,6 +9,7 @@ final class BakerTests: XCTestCase {
   func testCompatibilityRedrawRemainsTheDefault() {
     XCTAssertEqual(BakeOptions().method, .redraw)
     XCTAssertFalse(BakeOptions().optimize)
+    XCTAssertTrue(BakeOptions().preserveLinks)
   }
 
   func testNewMethodsFlattenVectorAppearanceWithoutCreatingImages() throws {
@@ -242,6 +244,201 @@ final class BakerTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: output), sentinel)
   }
 
+  func testPopupAndHiddenRemnantsAreRemovedWithoutLosingVisibleContent() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    for fixture in [BakingPDF(popup: true), BakingPDF(hidden: true)] {
+      let input = directory.appendingPathComponent("input.pdf")
+      let original = fixture.data()
+      try original.write(to: input)
+      for method in FlatteningMethod.allCases {
+        for optimize in [false, true] {
+          let output = directory.appendingPathComponent("output.pdf")
+          try Baker.bake(
+            input: input, to: output,
+            options: BakeOptions(method: method, optimize: optimize, qpdfExecutable: qpdf))
+          try assertStaticVectorPDF(output)
+          XCTAssertEqual(try Data(contentsOf: input), original)
+        }
+      }
+    }
+  }
+
+  func testFormsAreBakedWithAndWithoutOptimization() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    for checkbox in [false, true] {
+      let input = directory.appendingPathComponent("form.pdf")
+      try BakingPDF(hasForm: true, checkbox: checkbox).data().write(to: input)
+      for method in FlatteningMethod.allCases {
+        for optimize in [false, true] {
+          let output = directory.appendingPathComponent("output.pdf")
+          try Baker.bake(
+            input: input, to: output,
+            options: BakeOptions(method: method, optimize: optimize, qpdfExecutable: qpdf))
+          try assertStaticVectorPDF(output)
+          let document = try XCTUnwrap(CGPDFDocument(output as CFURL))
+          var form: CGPDFDictionaryRef?
+          XCTAssertFalse(
+            CGPDFDictionaryGetDictionary(try XCTUnwrap(document.catalog), "AcroForm", &form))
+        }
+      }
+    }
+  }
+
+  func testHyperlinkPreferenceAcrossMethodsAndOptimization() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("links.pdf")
+    try BakingPDF(link: true).data().write(to: input)
+    for method in FlatteningMethod.allCases {
+      for optimize in [false, true] {
+        for preserve in [false, true] {
+          let output = directory.appendingPathComponent("output.pdf")
+          try Baker.bake(
+            input: input, to: output,
+            options: BakeOptions(
+              method: method, optimize: optimize, preserveLinks: preserve, qpdfExecutable: qpdf))
+          let document = try XCTUnwrap(PDFDocument(url: output))
+          let annotations = try XCTUnwrap(document.page(at: 0)).annotations
+          XCTAssertEqual(
+            annotations.count, preserve ? 1 : 0, "\(method), optimize=\(optimize), keep=\(preserve)"
+          )
+          if preserve {
+            XCTAssertEqual(annotations.first?.type, "Link")
+            XCTAssertEqual(annotations.first?.url?.absoluteString, "https://example.com/test")
+            XCTAssertEqual(annotations.first?.bounds, CGRect(x: 100, y: 100, width: 50, height: 30))
+          }
+          let cg = try XCTUnwrap(CGPDFDocument(output as CFURL))
+          let page = try XCTUnwrap(cg.page(at: 1))
+          XCTAssertTrue(PageImageScanner(page: page, number: 1).contentImages().isEmpty)
+          let colors = try renderedColorCounts(page)
+          XCTAssertGreaterThan(colors.dark, 100)
+          XCTAssertGreaterThan(colors.red, 100)
+        }
+      }
+    }
+  }
+
+  func testRedrawTransformsLinkBoundsAndInternalDestinations() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    for rotation in [0, 90, 180, 270] {
+      let input = directory.appendingPathComponent("rotated.pdf")
+      let source = try XCTUnwrap(
+        PDFDocument(data: BakingPDF(link: true, rotation: rotation, crop: "[20 30 180 190]").data())
+      )
+      let sourcePage = try XCTUnwrap(source.page(at: 0))
+      let link = PDFAnnotation(
+        bounds: CGRect(x: 40, y: 50, width: 30, height: 20), forType: .link, withProperties: nil)
+      link.destination = PDFDestination(page: sourcePage, at: CGPoint(x: 60, y: 70))
+      sourcePage.addAnnotation(link)
+      XCTAssertTrue(source.write(to: input))
+      let output = directory.appendingPathComponent("output.pdf")
+      try Baker.bake(input: input, to: output)
+      let result = try XCTUnwrap(PDFDocument(url: output))
+      let page = try XCTUnwrap(result.page(at: 0))
+      XCTAssertEqual(page.annotations.count, 2)
+      let external = try XCTUnwrap(page.annotations.first { $0.url != nil })
+      let internalLink = try XCTUnwrap(page.annotations.first { $0.destination != nil })
+      // The redraw uses the crop box as its origin and normalizes rotation.
+      func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+        switch rotation {
+        case 90: return CGPoint(x: y - 30, y: 180 - x)
+        case 180: return CGPoint(x: 180 - x, y: 190 - y)
+        case 270: return CGPoint(x: 190 - y, y: x - 20)
+        default: return CGPoint(x: x - 20, y: y - 30)
+        }
+      }
+      let a = point(100, 100)
+      let b = point(150, 130)
+      let expected = CGRect(
+        x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+      XCTAssertEqual(external.bounds, expected, "rotation=\(rotation)")
+      let destination = try XCTUnwrap(internalLink.destination)
+      XCTAssertTrue(destination.page === page)
+      XCTAssertEqual(destination.point.x, point(60, 70).x, accuracy: 0.01)
+      XCTAssertEqual(destination.point.y, point(60, 70).y, accuracy: 0.01)
+    }
+  }
+
+  func testUnreadableInputDoesNotReplaceExistingOutput() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("invalid.pdf")
+    let original = Data("not a PDF".utf8)
+    try original.write(to: input)
+    let output = directory.appendingPathComponent("output.pdf")
+    let sentinel = Data("existing output".utf8)
+    try sentinel.write(to: output)
+    for method in FlatteningMethod.allCases {
+      XCTAssertThrowsError(
+        try Baker.bake(input: input, to: output, options: BakeOptions(method: method)))
+      XCTAssertEqual(try Data(contentsOf: input), original)
+      XCTAssertEqual(try Data(contentsOf: output), sentinel)
+    }
+  }
+
+  func testZeroPageInputFailsWithoutChangingFiles() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("empty.pdf")
+    let original = BakingPDF(empty: true).data()
+    try original.write(to: input)
+    let output = directory.appendingPathComponent("output.pdf")
+    let sentinel = Data("existing output".utf8)
+    try sentinel.write(to: output)
+    for method in FlatteningMethod.allCases {
+      XCTAssertThrowsError(
+        try Baker.bake(input: input, to: output, options: BakeOptions(method: method)))
+      XCTAssertEqual(try Data(contentsOf: input), original)
+      XCTAssertEqual(try Data(contentsOf: output), sentinel)
+    }
+  }
+
+  func testQpdfKeepsDirectLinkDictionaries() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("direct.pdf")
+    try BakingPDF(directLink: true).data().write(to: input)
+    let output = directory.appendingPathComponent("output.pdf")
+    try Baker.bake(
+      input: input, to: output, options: BakeOptions(method: .preserveContent, qpdfExecutable: qpdf)
+    )
+    let document = try XCTUnwrap(PDFDocument(url: output))
+    let annotations = try XCTUnwrap(document.page(at: 0)).annotations
+    XCTAssertEqual(annotations.count, 1)
+    XCTAssertEqual(annotations.first?.url?.absoluteString, "https://example.com/test")
+  }
+
+  func testRedrawBakesLinkAppearanceOnceWhenKeepingClickableTarget() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    for rotation in [0, 90, 180, 270] {
+      let input = directory.appendingPathComponent("appearance.pdf")
+      try BakingPDF(link: true, linkAppearance: true, rotation: rotation).data().write(to: input)
+      let kept = directory.appendingPathComponent("kept.pdf")
+      let discarded = directory.appendingPathComponent("discarded.pdf")
+      try Baker.bake(input: input, to: kept)
+      try Baker.bake(input: input, to: discarded, options: BakeOptions(preserveLinks: false))
+      let a = try XCTUnwrap(CGPDFDocument(kept as CFURL))
+      let b = try XCTUnwrap(CGPDFDocument(discarded as CFURL))
+      let keptColors = try renderedColorCounts(XCTUnwrap(a.page(at: 1)))
+      let discardedColors = try renderedColorCounts(XCTUnwrap(b.page(at: 1)))
+      XCTAssertEqual(keptColors.red, discardedColors.red)
+      XCTAssertEqual(keptColors.dark, discardedColors.dark)
+      let document = try XCTUnwrap(PDFDocument(url: kept))
+      let link = try XCTUnwrap(document.page(at: 0)?.annotations.first)
+      XCTAssertEqual(link.url?.absoluteString, "https://example.com/test")
+      XCTAssertNil(link.value(forAnnotationKey: PDFAnnotationKey(rawValue: "AP")))
+      XCTAssertEqual(link.border?.lineWidth ?? 0, 0)
+    }
+  }
+
   private func assertStaticVectorPDF(
     _ url: URL,
     file: StaticString = #filePath,
@@ -342,25 +539,41 @@ private struct BakingPDF {
   var hasForm = false
   var needsAppearances = false
   var repetitions = 1
+  var popup = false
+  var hidden = false
+  var link = false
+  var checkbox = false
+  var directLink = false
+  var linkAppearance = false
+  var empty = false
+  var rotation = 0
+  var crop = "[0 0 200 200]"
 
   func data() -> Data {
     let catalog = "<< /Type /Catalog /Pages 2 0 R" + (hasForm ? " /AcroForm 7 0 R" : "") + " >>"
+    let linkDictionary =
+      "<< /Type /Annot /Subtype /Link /Rect [100 100 150 130] /Border [0 0 0] /A << /S /URI /URI (https://example.com/test) >> >>"
+    let extraReference = directLink ? linkDictionary : (popup || hidden || link ? "8 0 R" : "")
     let page =
       "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
-      + "/Resources << >> /Contents 4 0 R /Annots [5 0 R] >>"
+      + "/CropBox \(crop) /Rotate \(rotation) /Resources << >> /Contents 4 0 R /Annots [5 0 R \(extraReference)] >>"
     let path = String(repeating: "10 10 m 190 190 l 10 190 m 190 10 l S\n", count: repetitions)
     let annotationType =
-      hasForm ? "/Subtype /Widget /FT /Tx /T (Name) /V (Hello)" : "/Subtype /Stamp"
+      hasForm
+      ? (checkbox
+        ? "/Subtype /Widget /FT /Btn /T (Check) /V /Yes /AS /Yes"
+        : "/Subtype /Widget /FT /Tx /T (Name) /V (Hello)")
+      : (popup ? "/Subtype /Text /Popup 8 0 R" : "/Subtype /Stamp")
     let appearanceEntry: String
     switch appearance {
     case .stream:
-      appearanceEntry = "/AP << /N 6 0 R >>"
+      appearanceEntry = checkbox ? "/AP << /N << /Yes 6 0 R >> >>" : "/AP << /N 6 0 R >>"
     case .none:
       appearanceEntry = ""
     case .missingSelectedState:
       appearanceEntry = "/AP << /N << /On 6 0 R >> >> /AS /Off"
     case .missingBoundingBox:
-      appearanceEntry = "/AP << /N 6 0 R >>"
+      appearanceEntry = checkbox ? "/AP << /N << /Yes 6 0 R >> >>" : "/AP << /N 6 0 R >>"
     }
     let annotation =
       "<< /Type /Annot \(annotationType) /Rect [40 40 90 90] /F 4 \(appearanceEntry) >>"
@@ -373,7 +586,10 @@ private struct BakingPDF {
 
     var bodies: [Data] = [
       Data(catalog.utf8),
-      Data("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".utf8),
+      Data(
+        (empty
+          ? "<< /Type /Pages /Kids [] /Count 0 >>" : "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+          .utf8),
       Data(page.utf8),
       stream(dictionary: "", data: Data(path.utf8)),
       Data(annotation.utf8),
@@ -382,6 +598,16 @@ private struct BakingPDF {
     if hasForm {
       let stale = needsAppearances ? " /NeedAppearances true" : ""
       bodies.append(Data("<< /Fields [5 0 R]\(stale) >>".utf8))
+    }
+    if popup || hidden || link {
+      if !hasForm { bodies.append(Data("null".utf8)) }
+      let extra =
+        popup
+        ? "/Subtype /Popup /Parent 5 0 R /F 2"
+        : (hidden
+          ? "/Subtype /Stamp /F 2"
+          : "/Subtype /Link /Border [0 0 0] \(linkAppearance ? "/AP << /N 6 0 R >>" : "") /A << /S /URI /URI (https://example.com/test) >>")
+      bodies.append(Data("<< /Type /Annot \(extra) /Rect [100 100 150 130] >>".utf8))
     }
     return serialize(bodies)
   }

@@ -42,7 +42,8 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
 
 The compatibility redraw remains the default. `Baker.bake` opens the document with PDFKit
 and draws each page into a new `CGPDFContext`. `PDFPage.draw(with:to:)` renders annotation
-appearances along with page content, and the new document contains no annotation objects.
+appearances along with page content, and the new document contains no editable markup or form fields. Hyperlinks remain clickable
+by default. Turn off "Keep hyperlinks clickable" in Settings to discard them.
 
 Settings also offers two methods for comparing output on a particular document:
 
@@ -52,7 +53,7 @@ Settings also offers two methods for comparing output on a particular document:
 
 Both methods preserve vector content in the synthetic test fixture without introducing image
 objects. That result is evidence for the fixture, not a guarantee for every PDF producer or
-annotation type. PDF Oven rejects visible annotations that have no selected appearance stream
+annotation type. PDF Oven rejects visible markup annotations that have no selected appearance stream
 and forms marked with stale appearances rather than risk dropping or baking the wrong content.
 An unmarked stale appearance cannot be detected reliably from the PDF structure.
 
@@ -65,7 +66,7 @@ The following behavior describes the compatibility redraw:
 - Text stays real text (searchable and selectable), including text inside note annotations.
 - Page rotation and offset crop boxes are baked into the output geometry.
 - Document title/author/subject/creator/keywords are carried over.
-- Not carried over: outlines/bookmarks, links, embedded attachments, and unfilled form
+- Not carried over: outlines/bookmarks, embedded attachments, and unfilled form
   fields (fields are baked in at their current values). Password-protected files are skipped
   with an error rather than being unlocked.
 

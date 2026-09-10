@@ -11,6 +11,8 @@ public enum FlatteningMethod: String, CaseIterable, Sendable {
 public struct BakeOptions: Sendable {
   public var method: FlatteningMethod
   public var optimize: Bool
+  /// Retains hyperlink actions after baking. Disable to remove interactive links as well.
+  public var preserveLinks: Bool
   /// Tests and non-app clients may supply an absolute qpdf path. The app always uses its
   /// bundled helper and never searches PATH.
   public var qpdfExecutable: URL?
@@ -18,10 +20,12 @@ public struct BakeOptions: Sendable {
   public init(
     method: FlatteningMethod = .redraw,
     optimize: Bool = false,
+    preserveLinks: Bool = true,
     qpdfExecutable: URL? = nil
   ) {
     self.method = method
     self.optimize = optimize
+    self.preserveLinks = preserveLinks
     self.qpdfExecutable = qpdfExecutable
   }
 }
@@ -44,6 +48,7 @@ public enum BakeError: LocalizedError {
   case formAppearancesNeedUpdating
   case annotationsRemain(Int)
   case formFieldsRemain(Int)
+  case formStructureRemains
   case pageCountChanged(expected: Int, actual: Int)
   case outputMatchesInput(URL)
 
@@ -73,9 +78,13 @@ public enum BakeError: LocalizedError {
         "The form says its appearances are out of date. Resave it in a PDF editor or use "
         + "Compatibility redraw so field values are not baked incorrectly."
     case .annotationsRemain(let count):
-      return "The result still contains \(count) editable annotation\(count == 1 ? "" : "s")."
+      return
+        "The result still contains \(count) editable annotation\(count == 1 ? "" : "s"). Use Compatibility redraw instead."
     case .formFieldsRemain(let count):
-      return "The result still contains \(count) editable form field\(count == 1 ? "" : "s")."
+      return
+        "The result still contains \(count) editable form field\(count == 1 ? "" : "s"). Use Compatibility redraw instead."
+    case .formStructureRemains:
+      return "The result still contains a form dictionary. Use Compatibility redraw instead."
     case .pageCountChanged(let expected, let actual):
       return "The result has \(actual) pages; the input has \(expected)."
     case .outputMatchesInput(let url):
@@ -114,19 +123,32 @@ public enum Baker {
 
     switch options.method {
     case .preserveContent:
-      try qpdf?.flatten(input: input, output: work.baked)
+      try qpdf?.flatten(input: input, output: work.baked, preserveLinks: options.preserveLinks)
     case .pdfKit:
-      try burnInWithPDFKit(source, output: work.baked)
+      try burnInWithPDFKit(source, output: work.baked, preserveLinks: options.preserveLinks)
     case .redraw:
       try redraw(source, output: work.baked)
+      if options.preserveLinks {
+        try restoreLinks(from: source, output: work.baked, transformed: true)
+      }
     }
-    try validate(work.baked, expectedPages: pageCount)
+    if options.method != .redraw {
+      let counts = try structuralCounts(in: work.baked, preserveLinks: options.preserveLinks)
+      if counts.annotations > 0 || counts.hasAcroForm {
+        let helper = try qpdf ?? QPDF(executable: options.qpdfExecutable)
+        try helper.clean(
+          input: work.baked, output: work.optimized, preserveLinks: options.preserveLinks)
+        try FileManager.default.removeItem(at: work.baked)
+        try FileManager.default.moveItem(at: work.optimized, to: work.baked)
+      }
+    }
+    try validate(work.baked, expectedPages: pageCount, preserveLinks: options.preserveLinks)
 
     var chosen = work.baked
     var optimized = false
     if let qpdf, options.optimize {
       try qpdf.optimize(input: work.baked, output: work.optimized)
-      try validate(work.optimized, expectedPages: pageCount)
+      try validate(work.optimized, expectedPages: pageCount, preserveLinks: options.preserveLinks)
       if fileSize(work.optimized) < fileSize(work.baked) {
         chosen = work.optimized
         optimized = true
@@ -148,7 +170,20 @@ public enum Baker {
     return document
   }
 
-  private static func burnInWithPDFKit(_ document: PDFDocument, output: URL) throws {
+  private static func burnInWithPDFKit(_ document: PDFDocument, output: URL, preserveLinks: Bool)
+    throws
+  {
+    let links = (0..<document.pageCount).flatMap { index -> [(PDFPage, PDFAnnotation)] in
+      guard let page = document.page(at: index) else { return [] }
+      return page.annotations.filter { $0.type == "Link" }.map { (page, $0) }
+    }
+    // PDFKit burns links too; retain their original actions separately.
+    if preserveLinks { for (page, link) in links { page.removeAnnotation(link) } }
+    defer {
+      if preserveLinks {
+        for (page, link) in links where link.page == nil { page.addAnnotation(link) }
+      }
+    }
     let options: [PDFDocumentWriteOption: Any] = [
       .burnInAnnotationsOption: true,
       .saveImagesAsJPEGOption: false,
@@ -157,6 +192,66 @@ public enum Baker {
     guard document.write(to: output, withOptions: options) else {
       throw BakeError.writeFailed(output)
     }
+    if preserveLinks {
+      for (page, link) in links { page.addAnnotation(link) }
+      try restoreLinks(from: document, output: output, transformed: false)
+    }
+  }
+
+  private static func restoreLinks(from source: PDFDocument, output: URL, transformed: Bool) throws
+  {
+    guard
+      (0..<source.pageCount).contains(where: { index in
+        source.page(at: index)?.annotations.contains(where: { $0.type == "Link" }) == true
+      })
+    else { return }
+    let target = try open(output)
+    func transform(_ page: PDFPage) -> CGAffineTransform {
+      guard transformed, let ref = page.pageRef else { return .identity }
+      return ref.getDrawingTransform(
+        .cropBox,
+        rect: CGRect(origin: .zero, size: renderedSize(of: page)), rotate: 0,
+        preserveAspectRatio: true)
+    }
+    for index in 0..<source.pageCount {
+      guard let page = source.page(at: index), let destinationPage = target.page(at: index) else {
+        continue
+      }
+      for original in page.annotations where original.type == "Link" {
+        let link: PDFAnnotation
+        if transformed {
+          // The redraw already painted the original appearance. Add only its clickable
+          // region so rotated appearances and borders are neither moved nor painted twice.
+          link = PDFAnnotation(
+            bounds: original.bounds.applying(transform(page)), forType: .link,
+            withProperties: nil)
+          let border = PDFBorder()
+          border.lineWidth = 0
+          link.border = border
+          link.color = .clear
+          link.shouldDisplay = original.shouldDisplay
+          link.shouldPrint = original.shouldPrint
+          link.url = original.url
+          link.action = original.action
+        } else {
+          guard let copy = original.copy() as? PDFAnnotation else { continue }
+          link = copy
+        }
+        let destination = (original.action as? PDFActionGoTo)?.destination ?? original.destination
+        if let destination, let sourcePage = destination.page {
+          let destinationIndex = source.index(for: sourcePage)
+          if let targetPage = target.page(at: destinationIndex) {
+            let mapped = PDFDestination(
+              page: targetPage, at: destination.point.applying(transform(sourcePage)))
+            mapped.zoom = destination.zoom
+            link.destination = mapped
+            link.action = PDFActionGoTo(destination: mapped)
+          }
+        }
+        destinationPage.addAnnotation(link)
+      }
+    }
+    guard target.write(to: output) else { throw BakeError.writeFailed(output) }
   }
 
   /// Re-draws every page into a fresh PDF context. This is retained for files whose annotation
@@ -190,37 +285,51 @@ public enum Baker {
     }
   }
 
-  private static func validate(_ url: URL, expectedPages: Int) throws {
+  private static func validate(_ url: URL, expectedPages: Int, preserveLinks: Bool) throws {
     let document = try open(url)
     guard document.pageCount == expectedPages else {
       throw BakeError.pageCountChanged(expected: expectedPages, actual: document.pageCount)
     }
-    let structure = try structuralCounts(in: url)
+    let structure = try structuralCounts(in: url, preserveLinks: preserveLinks)
     guard structure.annotations == 0 else {
       throw BakeError.annotationsRemain(structure.annotations)
     }
     guard structure.formFields == 0 else {
       throw BakeError.formFieldsRemain(structure.formFields)
     }
+    guard !structure.hasAcroForm else { throw BakeError.formStructureRemains }
   }
 
-  private static func structuralCounts(in url: URL) throws -> (annotations: Int, formFields: Int) {
+  private static func structuralCounts(in url: URL, preserveLinks: Bool) throws -> (
+    annotations: Int, formFields: Int, hasAcroForm: Bool
+  ) {
     guard let document = CGPDFDocument(url as CFURL) else { throw BakeError.cannotOpen(url) }
     var annotations = 0
+    guard document.numberOfPages > 0 else { throw BakeError.emptyDocument(url) }
     for pageNumber in 1...document.numberOfPages {
       guard let page = document.page(at: pageNumber), let dictionary = page.dictionary else {
         throw BakeError.cannotOpen(url)
       }
       var pageAnnotations: CGPDFArrayRef?
       if CGPDFDictionaryGetArray(dictionary, "Annots", &pageAnnotations), let pageAnnotations {
-        annotations += CGPDFArrayGetCount(pageAnnotations)
+        for index in 0..<CGPDFArrayGetCount(pageAnnotations) {
+          var annotation: CGPDFDictionaryRef?
+          if preserveLinks, CGPDFArrayGetDictionary(pageAnnotations, index, &annotation),
+            let annotation, annotationSubtype(annotation) == "Link"
+          {
+            continue
+          }
+          annotations += 1
+        }
       }
     }
 
     var formFields = 0
+    var hasAcroForm = false
     if let catalog = document.catalog {
       var form: CGPDFDictionaryRef?
       if CGPDFDictionaryGetDictionary(catalog, "AcroForm", &form), let form {
+        hasAcroForm = true
         var fields: CGPDFArrayRef?
         if CGPDFDictionaryGetArray(form, "Fields", &fields), let fields {
           formFields = CGPDFArrayGetCount(fields)
@@ -229,7 +338,7 @@ public enum Baker {
     } else {
       throw BakeError.cannotOpen(url)
     }
-    return (annotations, formFields)
+    return (annotations, formFields, hasAcroForm)
   }
 
   /// The new methods may remove annotations that have no usable appearance to paint. Refuse
@@ -238,6 +347,7 @@ public enum Baker {
     -> (page: Int, subtype: String)?
   {
     guard let document = CGPDFDocument(url as CFURL) else { throw BakeError.cannotOpen(url) }
+    guard document.numberOfPages > 0 else { throw BakeError.emptyDocument(url) }
     for pageNumber in 1...document.numberOfPages {
       guard let page = document.page(at: pageNumber), let pageDictionary = page.dictionary else {
         throw BakeError.cannotOpen(url)
@@ -251,7 +361,9 @@ public enum Baker {
         guard CGPDFArrayGetDictionary(annotations, index, &annotation), let annotation else {
           continue
         }
-        if isDeliberatelyInvisible(annotation) || annotationSubtype(annotation) == "Popup" {
+        if isDeliberatelyInvisible(annotation)
+          || ["Popup", "Link"].contains(annotationSubtype(annotation) ?? "")
+        {
           continue
         }
         if hasUsableNormalAppearance(annotation) { continue }
@@ -426,8 +538,97 @@ private struct QPDF {
     executable = candidate
   }
 
-  func flatten(input: URL, output: URL) throws {
-    try run(["--flatten-annotations=all", "--remove-acroform", "--", input.path, output.path])
+  func flatten(input: URL, output: URL, preserveLinks: Bool) throws {
+    let prepared = output.appendingPathExtension("prepared.pdf")
+    let flattened = output.appendingPathExtension("flattened.pdf")
+    defer {
+      try? FileManager.default.removeItem(at: prepared)
+      try? FileManager.default.removeItem(at: flattened)
+    }
+    if preserveLinks {
+      try patch(input: input, output: prepared) { objects in
+        func hideLinks(_ object: Any) -> Any {
+          if let array = object as? [Any] { return array.map(hideLinks) }
+          guard var dictionary = object as? [String: Any] else { return object }
+          if dictionary["/Subtype"] as? String == "/Link" {
+            dictionary["/PDFOvenOriginalFlags"] = dictionary["/F"] ?? 0
+            dictionary["/F"] = (dictionary["/F"] as? Int ?? 0) | 2
+          }
+          return dictionary.mapValues(hideLinks)
+        }
+        objects = objects.mapValues(hideLinks)
+      }
+    }
+    try run([
+      "--flatten-annotations=all", "--remove-acroform", "--",
+      preserveLinks ? prepared.path : input.path, flattened.path,
+    ])
+    // qpdf may renumber objects; original flags travel on each link until cleanup.
+    try clean(input: flattened, output: output, preserveLinks: preserveLinks)
+  }
+
+  func clean(input: URL, output: URL, preserveLinks: Bool) throws {
+    try patch(input: input, output: output) { objects in
+      func dictionary(_ object: Any) -> [String: Any]? {
+        if let reference = object as? String {
+          return (objects["obj:" + reference] as? [String: Any])?["value"] as? [String: Any]
+        }
+        return object as? [String: Any]
+      }
+      func restoreFlags(_ object: Any) -> Any {
+        if let array = object as? [Any] { return array.map(restoreFlags) }
+        guard var dictionary = object as? [String: Any] else { return object }
+        if dictionary["/Subtype"] as? String == "/Link",
+          let flags = dictionary.removeValue(forKey: "/PDFOvenOriginalFlags")
+        {
+          dictionary["/F"] = flags
+        }
+        return dictionary.mapValues(restoreFlags)
+      }
+      objects = objects.mapValues(restoreFlags)
+      for key in Array(objects.keys) {
+        guard var wrapper = objects[key] as? [String: Any],
+          var value = wrapper["value"] as? [String: Any]
+        else { continue }
+        if value["/Type"] as? String == "/Catalog" { value.removeValue(forKey: "/AcroForm") }
+        if let annotationValue = value["/Annots"] {
+          let annotations: [Any]?
+          if let reference = annotationValue as? String {
+            annotations = (objects["obj:" + reference] as? [String: Any])?["value"] as? [Any]
+          } else {
+            annotations = annotationValue as? [Any]
+          }
+          if let annotations {
+            value["/Annots"] = annotations.filter { object in
+              guard let annotation = dictionary(object) else { return true }
+              let subtype = annotation["/Subtype"] as? String
+              if subtype == "/Link" { return preserveLinks }
+              let flags = annotation["/F"] as? Int ?? 0
+              return subtype != "/Popup" && flags & 3 == 0
+            }
+          }
+        }
+        wrapper["value"] = value
+        objects[key] = wrapper
+      }
+    }
+  }
+
+  private func patch(input: URL, output: URL, edit: (inout [String: Any]) -> Void) throws {
+    let data = try run(["--json-output=2", "--json-stream-data=none", "--", input.path])
+    guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let sections = json["qpdf"] as? [Any], sections.count == 2,
+      var objects = sections[1] as? [String: Any]
+    else { throw BakeError.qpdfFailed(-1, "Invalid structural JSON from qpdf.") }
+    edit(&objects)
+    // Stream dictionaries are unchanged and intentionally omitted: only dictionary objects
+    // are patched, so qpdf retains the original encoded vector and image streams.
+    objects = objects.filter { ($0.value as? [String: Any])?["value"] != nil }
+    let update = output.appendingPathExtension("json")
+    defer { try? FileManager.default.removeItem(at: update) }
+    try JSONSerialization.data(withJSONObject: ["qpdf": [sections[0], objects]])
+      .write(to: update)
+    try run(["--update-from-json=" + update.path, "--", input.path, output.path])
   }
 
   func optimize(input: URL, output: URL) throws {
@@ -437,7 +638,8 @@ private struct QPDF {
     ])
   }
 
-  private func run(_ arguments: [String]) throws {
+  @discardableResult
+  private func run(_ arguments: [String]) throws -> Data {
     let diagnostics = FileManager.default.temporaryDirectory
       .appendingPathComponent("pdfoven-qpdf-\(UUID().uuidString).log")
     FileManager.default.createFile(atPath: diagnostics.path, contents: nil)
@@ -460,6 +662,8 @@ private struct QPDF {
           .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         throw BakeError.qpdfFailed(process.terminationStatus, message)
       }
+      try file.synchronize()
+      return try Data(contentsOf: diagnostics)
     } catch let error as BakeError {
       throw error
     } catch {
