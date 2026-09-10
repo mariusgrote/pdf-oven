@@ -216,32 +216,34 @@ final class BakerTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: input), original)
   }
 
-  func testQpdfWarningsAreFailuresAndDoNotReplaceOutput() throws {
+  func testQpdfRecoverableWarningsAreAccepted() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let input = directory.appendingPathComponent("input.pdf")
     try BakingPDF().data().write(to: input)
     let output = directory.appendingPathComponent("output.pdf")
-    let sentinel = Data("existing output".utf8)
-    try sentinel.write(to: output)
 
     let helper = directory.appendingPathComponent("qpdf-warning")
-    try Data("#!/bin/sh\necho malformed PDF >&2\nexit 3\n".utf8).write(to: helper)
+    let qpdf = try requireQPDF()
+    let script = """
+      #!/bin/sh
+      "\(qpdf.path)" "$@"
+      status=$?
+      if [ "$status" -eq 0 ]; then
+        echo "recoverable PDF warning" >&2
+        exit 3
+      fi
+      exit "$status"
+      """
+    try Data(script.utf8).write(to: helper)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
 
-    XCTAssertThrowsError(
-      try Baker.bake(
-        input: input,
-        to: output,
-        options: BakeOptions(method: .preserveContent, qpdfExecutable: helper)
-      )
-    ) { error in
-      guard case BakeError.qpdfFailed(3, let message) = error else {
-        return XCTFail("Unexpected error: \(error)")
-      }
-      XCTAssertTrue(message.contains("malformed PDF"))
-    }
-    XCTAssertEqual(try Data(contentsOf: output), sentinel)
+    try Baker.bake(
+      input: input,
+      to: output,
+      options: BakeOptions(method: .preserveContent, qpdfExecutable: helper)
+    )
+    XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
   }
 
   func testPopupAndHiddenRemnantsAreRemovedWithoutLosingVisibleContent() throws {
