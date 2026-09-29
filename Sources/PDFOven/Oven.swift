@@ -79,12 +79,14 @@ struct BakeItem: Identifiable {
     case waiting
     case working
     case done(URL, String)
+    case doneWithWarning(URL, String, String)
     case failed(String)
+    case annotationDecision(page: Int, subtype: String)
 
     var isPending: Bool {
       switch self {
       case .waiting, .working: return true
-      case .done, .failed: return false
+      case .done, .doneWithWarning, .failed, .annotationDecision: return false
       }
     }
   }
@@ -92,11 +94,13 @@ struct BakeItem: Identifiable {
   let id = UUID()
   let input: URL
   let action: Action
-  let preferences: RunPreferences
+  var preferences: RunPreferences
   var status: Status = .waiting
+  var annotationPageToCheck: Int?
 
   var outputURL: URL? {
     if case .done(let url, _) = status { return url }
+    if case .doneWithWarning(let url, _, _) = status { return url }
     return nil
   }
 }
@@ -134,6 +138,30 @@ final class Oven: ObservableObject {
         BakeItem(input: $0, action: action, preferences: preferences)
       })
 
+    scheduleDrain()
+  }
+
+  func extract(_ urls: [URL]) { add(urls, action: .extract) }
+
+  func retryAnnotation(_ id: UUID, using method: FlatteningMethod?) {
+    guard let index = items.firstIndex(where: { $0.id == id }),
+      case .annotationDecision(let page, _) = items[index].status
+    else { return }
+    var bake = items[index].preferences.bake
+    if let method {
+      bake.method = method
+    } else {
+      bake.allowMissingAppearance = true
+    }
+    let previous = items[index].preferences
+    items[index].preferences = RunPreferences(
+      destination: previous.destination, bake: bake, reveal: previous.reveal)
+    items[index].annotationPageToCheck = method == nil ? page : nil
+    items[index].status = .waiting
+    scheduleDrain()
+  }
+
+  private func scheduleDrain() {
     let previous = drain
     drain = Task { [weak self] in
       await previous?.value
@@ -141,19 +169,18 @@ final class Oven: ObservableObject {
     }
   }
 
-  func extract(_ urls: [URL]) { add(urls, action: .extract) }
-
   private func processPending() async {
     while let index = items.firstIndex(where: { $0.status == .waiting }) {
       let itemID = items[index].id
       let input = items[index].input
       let action = items[index].action
       let preferences = items[index].preferences
+      let annotationPageToCheck = items[index].annotationPageToCheck
       items[index].status = .working
       // Every file still in the list is an input of this run and must not be written over.
       let protected = items.map(\.input)
       let result = await Task.detached(priority: .userInitiated) {
-        () -> Result<(URL, String), Error> in
+        () -> Result<(URL, String, String?), Error> in
         do {
           switch action {
           case .bake:
@@ -171,7 +198,7 @@ final class Oven: ObservableObject {
               + ByteCountFormatter.string(
                 fromByteCount: Int64(baked.outputBytes), countStyle: .file)
             if baked.usedOptimizedFile { detail += " · losslessly compressed" }
-            return .success((output, detail))
+            return .success((output, detail, baked.optimizationWarning))
           case .extract:
             let extracted = try ImageExtractor().extract(
               input, options: preferences.destination, protecting: protected)
@@ -180,7 +207,7 @@ final class Oven: ObservableObject {
               + ByteCountFormatter.string(
                 fromByteCount: Int64(extracted.bytes), countStyle: .file)
             if extracted.skipped > 0 { detail += " · \(extracted.skipped) skipped" }
-            return .success((extracted.folder, detail))
+            return .success((extracted.folder, detail, nil))
           }
         } catch {
           return .failure(error)
@@ -192,12 +219,28 @@ final class Oven: ObservableObject {
       guard let current = items.firstIndex(where: { $0.id == itemID }) else { continue }
       switch result {
       case .success(let completion):
-        items[current].status = .done(completion.0, completion.1)
+        var warnings: [String] = []
+        if let page = annotationPageToCheck {
+          warnings.append("Check page \(page) in the saved PDF. The annotation may be missing.")
+        }
+        if let compressionError = completion.2 {
+          warnings.append("Saved uncompressed. Compression failed: \(compressionError)")
+        }
+        if !warnings.isEmpty {
+          items[current].status = .doneWithWarning(
+            completion.0, completion.1, warnings.joined(separator: " "))
+        } else {
+          items[current].status = .done(completion.0, completion.1)
+        }
         if preferences.reveal {
           NSWorkspace.shared.activateFileViewerSelecting([completion.0])
         }
       case .failure(let error):
-        items[current].status = .failed(error.localizedDescription)
+        if case BakeError.annotationHasNoAppearance(let page, let subtype) = error {
+          items[current].status = .annotationDecision(page: page, subtype: subtype)
+        } else {
+          items[current].status = .failed(error.localizedDescription)
+        }
       }
     }
   }

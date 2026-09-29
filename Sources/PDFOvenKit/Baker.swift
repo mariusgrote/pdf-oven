@@ -11,6 +11,8 @@ public enum FlatteningMethod: String, CaseIterable, Sendable {
 public struct BakeOptions: Sendable {
   public var method: FlatteningMethod
   public var optimize: Bool
+  /// Permit a missing annotation appearance after the user accepts possible omission.
+  public var allowMissingAppearance: Bool
   /// Retains hyperlink actions after baking. Disable to remove interactive links as well.
   public var preserveLinks: Bool
   /// Tests and non-app clients may supply an absolute qpdf path. The app always uses its
@@ -21,12 +23,14 @@ public struct BakeOptions: Sendable {
     method: FlatteningMethod = .redraw,
     optimize: Bool = false,
     preserveLinks: Bool = true,
-    qpdfExecutable: URL? = nil
+    qpdfExecutable: URL? = nil,
+    allowMissingAppearance: Bool = false
   ) {
     self.method = method
     self.optimize = optimize
     self.preserveLinks = preserveLinks
     self.qpdfExecutable = qpdfExecutable
+    self.allowMissingAppearance = allowMissingAppearance
   }
 }
 
@@ -34,6 +38,7 @@ public struct BakeResult: Sendable {
   public let inputBytes: Int
   public let outputBytes: Int
   public let usedOptimizedFile: Bool
+  public let optimizationWarning: String?
 }
 
 public enum BakeError: LocalizedError {
@@ -72,7 +77,7 @@ public enum BakeError: LocalizedError {
     case .annotationHasNoAppearance(let page, let subtype):
       return
         "Page \(page) has a visible \(subtype) annotation without an appearance. "
-        + "Flattening could remove it without painting it. Use Compatibility redraw instead."
+        + "Flattening could remove it without painting it."
     case .formAppearancesNeedUpdating:
       return
         "The form says its appearances are out of date. Resave it in a PDF editor or use "
@@ -105,14 +110,25 @@ public enum Baker {
     let source = try open(input)
     let pageCount = source.pageCount
     let inputBytes = fileSize(input)
-    let qpdf =
-      options.method == .preserveContent || options.optimize
-      ? try QPDF(executable: options.qpdfExecutable) : nil
+    var optimizationWarning: String?
+    let qpdf: QPDF?
+    if options.method == .preserveContent {
+      qpdf = try QPDF(executable: options.qpdfExecutable)
+    } else if options.optimize {
+      do {
+        qpdf = try QPDF(executable: options.qpdfExecutable)
+      } catch {
+        qpdf = nil
+        optimizationWarning = error.localizedDescription
+      }
+    } else {
+      qpdf = nil
+    }
 
     let work = TemporaryOutputs(beside: output)
     defer { work.removeAll() }
 
-    if options.method != .redraw,
+    if options.method != .redraw, !options.allowMissingAppearance,
       let missing = try firstAnnotationWithoutAppearance(in: input)
     {
       throw BakeError.annotationHasNoAppearance(page: missing.page, subtype: missing.subtype)
@@ -123,7 +139,9 @@ public enum Baker {
 
     switch options.method {
     case .preserveContent:
-      try qpdf?.flatten(input: input, output: work.baked, preserveLinks: options.preserveLinks)
+      try qpdf?.flatten(
+        input: input, output: work.baked, preserveLinks: options.preserveLinks,
+        dropMissingAppearances: options.allowMissingAppearance)
     case .pdfKit:
       try burnInWithPDFKit(source, output: work.baked, preserveLinks: options.preserveLinks)
     case .redraw:
@@ -147,11 +165,15 @@ public enum Baker {
     var chosen = work.baked
     var optimized = false
     if let qpdf, options.optimize {
-      try qpdf.optimize(input: work.baked, output: work.optimized)
-      try validate(work.optimized, expectedPages: pageCount, preserveLinks: options.preserveLinks)
-      if fileSize(work.optimized) < fileSize(work.baked) {
-        chosen = work.optimized
-        optimized = true
+      do {
+        try qpdf.optimize(input: work.baked, output: work.optimized)
+        try validate(work.optimized, expectedPages: pageCount, preserveLinks: options.preserveLinks)
+        if fileSize(work.optimized) < fileSize(work.baked) {
+          chosen = work.optimized
+          optimized = true
+        }
+      } catch {
+        optimizationWarning = error.localizedDescription
       }
     }
 
@@ -159,7 +181,8 @@ public enum Baker {
     return BakeResult(
       inputBytes: inputBytes,
       outputBytes: fileSize(output),
-      usedOptimizedFile: optimized
+      usedOptimizedFile: optimized,
+      optimizationWarning: optimizationWarning
     )
   }
 
@@ -538,7 +561,7 @@ private struct QPDF {
     executable = candidate
   }
 
-  func flatten(input: URL, output: URL, preserveLinks: Bool) throws {
+  func flatten(input: URL, output: URL, preserveLinks: Bool, dropMissingAppearances: Bool) throws {
     let prepared = output.appendingPathExtension("prepared.pdf")
     let flattened = output.appendingPathExtension("flattened.pdf")
     defer {
@@ -564,10 +587,14 @@ private struct QPDF {
       preserveLinks ? prepared.path : input.path, flattened.path,
     ])
     // qpdf may renumber objects; original flags travel on each link until cleanup.
-    try clean(input: flattened, output: output, preserveLinks: preserveLinks)
+    try clean(
+      input: flattened, output: output, preserveLinks: preserveLinks,
+      dropMissingAppearances: dropMissingAppearances)
   }
 
-  func clean(input: URL, output: URL, preserveLinks: Bool) throws {
+  func clean(
+    input: URL, output: URL, preserveLinks: Bool, dropMissingAppearances: Bool = false
+  ) throws {
     try patch(input: input, output: output) { objects in
       func dictionary(_ object: Any) -> [String: Any]? {
         if let reference = object as? String {
@@ -605,6 +632,7 @@ private struct QPDF {
               if subtype == "/Link" { return preserveLinks }
               let flags = annotation["/F"] as? Int ?? 0
               return subtype != "/Popup" && flags & 3 == 0
+                && (!dropMissingAppearances || annotation["/AP"] != nil)
             }
           }
         }

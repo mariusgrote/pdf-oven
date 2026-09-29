@@ -55,11 +55,16 @@ Both methods preserve vector content in the synthetic test fixture without intro
 objects. That result is evidence for the fixture, not a guarantee for every PDF producer or
 annotation type. PDF Oven rejects visible markup annotations that have no selected appearance stream
 and forms marked with stale appearances rather than risk dropping or baking the wrong content.
+For a missing annotation appearance, the file's queue row offers a choice to continue the
+selected method with possible omission or retry that file with Compatibility redraw.
+If the user continues the selected method, the result names the page to inspect.
 An unmarked stale appearance cannot be detected reliably from the PDF structure.
 
 Lossless qpdf compression is independent of the baking method. qpdf recompresses Flate streams
 at compression level 9 and generates object streams. It never converts or downsamples images.
 PDF Oven keeps the compressed copy only when it is smaller.
+If compression fails, PDF Oven saves the baked file without compression and shows the error
+beside the result.
 
 The following behavior describes the compatibility redraw:
 
