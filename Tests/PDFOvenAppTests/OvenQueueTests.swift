@@ -159,6 +159,61 @@ final class OvenQueueTests: XCTestCase {
     XCTAssertEqual(output.lastPathComponent, "rebake-second.pdf")
   }
 
+  func testMissingAppearanceRemindsOnlyAfterContinuing() async throws {
+    let defaults = UserDefaults.standard
+    let previousMethod = defaults.string(forKey: Preference.flatteningMethod)
+    let previousOptimize = defaults.object(forKey: Preference.optimize)
+    defer {
+      if let previousMethod {
+        defaults.set(previousMethod, forKey: Preference.flatteningMethod)
+      } else {
+        defaults.removeObject(forKey: Preference.flatteningMethod)
+      }
+      if let previousOptimize {
+        defaults.set(previousOptimize, forKey: Preference.optimize)
+      } else {
+        defaults.removeObject(forKey: Preference.optimize)
+      }
+    }
+    defaults.set(FlatteningMethod.pdfKit.rawValue, forKey: Preference.flatteningMethod)
+    defaults.set(false, forKey: Preference.optimize)
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("pdfoven-choice-tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("input.pdf")
+    try FixturePDF.data().write(to: input)
+
+    let oven = Oven()
+    oven.add([input])
+    try await waitUntilIdle(oven)
+    guard case .annotationDecision = oven.items[0].status else {
+      return XCTFail("Expected annotation choice, got \(oven.items[0].status)")
+    }
+    let id = oven.items[0].id
+    oven.retryAnnotation(id, using: .redraw)
+    try await waitUntilIdle(oven)
+    XCTAssertEqual(oven.items.count, 1)
+    XCTAssertEqual(oven.items[0].id, id)
+    XCTAssertEqual(oven.items[0].preferences.bake.method, .redraw)
+    guard case .done(let output, _) = oven.items[0].status else {
+      return XCTFail("Redraw did not finish: \(oven.items[0].status)")
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+
+    oven.add([input])
+    try await waitUntilIdle(oven)
+    guard case .annotationDecision(let page, _) = oven.items[1].status else {
+      return XCTFail("Expected annotation choice on the second run")
+    }
+    oven.retryAnnotation(oven.items[1].id, using: nil)
+    try await waitUntilIdle(oven)
+    guard case .doneWithWarning(_, _, let warning) = oven.items[1].status else {
+      return XCTFail("Accepted bake did not finish with a page reminder")
+    }
+    XCTAssertTrue(warning.contains("Check page \(page)"))
+  }
+
   private func waitUntilIdle(_ oven: Oven, timeout: TimeInterval = 30) async throws {
     let deadline = Date().addingTimeInterval(timeout)
     while oven.isBaking {

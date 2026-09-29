@@ -91,6 +91,7 @@ private struct DropZone: View {
 }
 
 private struct BakeRow: View {
+  @EnvironmentObject private var oven: Oven
   let item: BakeItem
 
   var body: some View {
@@ -103,9 +104,21 @@ private struct BakeRow: View {
           .truncationMode(.middle)
         Text(subtitle)
           .font(.caption)
-          .foregroundStyle(isFailed ? Color.red : .secondary)
-          .lineLimit(1)
+          .foregroundStyle(hasWarning ? Color.orange : .secondary)
+          .lineLimit(2)
           .truncationMode(.middle)
+          .help(subtitle)
+        if case .annotationDecision = item.status {
+          HStack {
+            Button("Continue flattening") {
+              oven.retryAnnotation(item.id, using: nil)
+            }
+            Button("Use Compatibility redraw") {
+              oven.retryAnnotation(item.id, using: .redraw)
+            }
+          }
+          .buttonStyle(.borderless)
+        }
       }
       Spacer()
       if let output = item.outputURL {
@@ -125,14 +138,16 @@ private struct BakeRow: View {
       ProgressView().controlSize(.small)
     case .done:
       Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-    case .failed:
+    case .doneWithWarning, .failed, .annotationDecision:
       Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
     }
   }
 
-  private var isFailed: Bool {
-    if case .failed = item.status { return true }
-    return false
+  private var hasWarning: Bool {
+    switch item.status {
+    case .doneWithWarning, .failed, .annotationDecision: return true
+    default: return false
+    }
   }
 
   private var subtitle: String {
@@ -140,7 +155,12 @@ private struct BakeRow: View {
     case .waiting: return "Waiting"
     case .working: return item.action.workingLabel
     case .done(_, let detail): return detail
+    case .doneWithWarning(_, let detail, let warning):
+      return "\(warning) · \(detail)"
     case .failed(let message): return message
+    case .annotationDecision(let page, let subtype):
+      return "Page \(page) has a visible \(subtype) annotation without an appearance. "
+        + "Continuing may omit it. Choose how to bake this file."
     }
   }
 }

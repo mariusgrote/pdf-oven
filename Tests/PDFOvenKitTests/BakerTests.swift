@@ -139,6 +139,23 @@ final class BakerTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: qpdfOutput), sentinel)
   }
 
+  func testMissingAppearanceCanBeAcceptedForOneBake() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("missing-appearance.pdf")
+    let output = directory.appendingPathComponent("accepted.pdf")
+    try BakingPDF(appearance: .none).data().write(to: input)
+
+    try Baker.bake(
+      input: input, to: output,
+      options: BakeOptions(
+        method: .preserveContent, qpdfExecutable: qpdf, allowMissingAppearance: true)
+    )
+    XCTAssertNotNil(CGPDFDocument(output as CFURL))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: input.path))
+  }
+
   func testNewMethodsRejectMissingSelectedAppearanceState() throws {
     let qpdf = try requireQPDF()
     let directory = try temporaryDirectory()
@@ -244,6 +261,53 @@ final class BakerTests: XCTestCase {
       options: BakeOptions(method: .preserveContent, qpdfExecutable: helper)
     )
     XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+  }
+
+  func testCompressionFailureSavesUncompressedBakeAndReportsError() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("input.pdf")
+    let output = directory.appendingPathComponent("output.pdf")
+    try BakingPDF().data().write(to: input)
+    let helper = directory.appendingPathComponent("qpdf-fails-compression")
+    try Data("#!/bin/sh\necho 'synthetic compression failure' >&2\nexit 2\n".utf8)
+      .write(to: helper)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+
+    let result = try Baker.bake(
+      input: input, to: output,
+      options: BakeOptions(method: .redraw, optimize: true, qpdfExecutable: helper)
+    )
+    XCTAssertFalse(result.usedOptimizedFile)
+    XCTAssertTrue(result.optimizationWarning?.contains("synthetic compression failure") == true)
+    XCTAssertNotNil(CGPDFDocument(output as CFURL))
+    XCTAssertGreaterThan(result.outputBytes, 0)
+  }
+
+  func testCompressionWarningStatusKeepsValidOutput() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("input.pdf")
+    let output = directory.appendingPathComponent("output.pdf")
+    try BakingPDF().data().write(to: input)
+    let helper = directory.appendingPathComponent("qpdf-warns-after-writing")
+    let script = """
+      #!/bin/sh
+      "\(qpdf.path)" "$@"
+      status=$?
+      if [ "$status" -eq 0 ]; then exit 3; fi
+      exit "$status"
+      """
+    try Data(script.utf8).write(to: helper)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+
+    let result = try Baker.bake(
+      input: input, to: output,
+      options: BakeOptions(method: .redraw, optimize: true, qpdfExecutable: helper)
+    )
+    XCTAssertNil(result.optimizationWarning)
+    XCTAssertNotNil(CGPDFDocument(output as CFURL))
   }
 
   func testPopupAndHiddenRemnantsAreRemovedWithoutLosingVisibleContent() throws {
