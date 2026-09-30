@@ -12,6 +12,8 @@ enum Preference {
   static let flatteningMethod = "flatteningMethod"
   static let optimize = "optimize"
   static let preserveLinks = "preserveLinks"
+  static let preserveForms = "preserveForms"
+  static let importAction = "importAction"
 
   static var defaultSuffix: String { Destination.defaultSuffix }
 
@@ -23,6 +25,8 @@ enum Preference {
       flatteningMethod: FlatteningMethod.redraw.rawValue,
       optimize: false,
       preserveLinks: true,
+      preserveForms: false,
+      importAction: BakeItem.Action.bake.rawValue,
     ])
   }
 
@@ -43,8 +47,14 @@ enum Preference {
       .flatMap(FlatteningMethod.init(rawValue:)) ?? .redraw
     return BakeOptions(
       method: method, optimize: defaults.bool(forKey: optimize),
-      preserveLinks: defaults.object(forKey: preserveLinks) as? Bool ?? true
+      preserveLinks: defaults.object(forKey: preserveLinks) as? Bool ?? true,
+      preserveForms: defaults.bool(forKey: preserveForms)
     )
+  }
+
+  static var selectedAction: BakeItem.Action {
+    let value = UserDefaults.standard.string(forKey: importAction)
+    return value == BakeItem.Action.removeAnnotations.rawValue ? .removeAnnotations : .bake
   }
 
   static var snapshot: RunPreferences {
@@ -63,14 +73,16 @@ struct RunPreferences: Sendable {
 }
 
 struct BakeItem: Identifiable {
-  enum Action: Equatable, Sendable {
+  enum Action: String, Equatable, Sendable {
     case bake
     case extract
+    case removeAnnotations
 
     var workingLabel: String {
       switch self {
       case .bake: return "Baking…"
       case .extract: return "Extracting…"
+      case .removeAnnotations: return "Removing annotations…"
       }
     }
   }
@@ -114,6 +126,12 @@ final class Oven: ObservableObject {
   /// The tail of the drain chain. Every `add` links a new drain behind the last one, so a
   /// file added while a drain is finishing is picked up by the drain that follows it.
   private var drain: Task<Void, Never>?
+  private let qpdfExecutable: URL?
+
+  /// Tests may inject a helper; the app uses the bundled executable.
+  init(qpdfExecutable: URL? = nil) {
+    self.qpdfExecutable = qpdfExecutable
+  }
 
   var isBaking: Bool {
     items.contains { $0.status == .waiting || $0.status == .working }
@@ -125,14 +143,19 @@ final class Oven: ObservableObject {
   }
 
   /// Accepts files and folders; folders are searched (one level deep and below) for PDFs.
-  func add(_ urls: [URL], action: BakeItem.Action = .bake) {
+  func add(_ urls: [URL], action requestedAction: BakeItem.Action? = nil) {
+    let action = requestedAction ?? Preference.selectedAction
     let pdfs = urls.flatMap(Destination.expand(_:)).filter { url in
       !items.contains {
         $0.input == url && $0.action == action && $0.status.isPending
       }
     }
     guard !pdfs.isEmpty else { return }
-    let preferences = Preference.snapshot
+    let snapshot = Preference.snapshot
+    var bake = snapshot.bake
+    bake.qpdfExecutable = qpdfExecutable
+    let preferences = RunPreferences(
+      destination: snapshot.destination, bake: bake, reveal: snapshot.reveal)
     items.append(
       contentsOf: pdfs.map {
         BakeItem(input: $0, action: action, preferences: preferences)
@@ -148,6 +171,8 @@ final class Oven: ObservableObject {
       case .annotationDecision(let page, _) = items[index].status
     else { return }
     var bake = items[index].preferences.bake
+    // Redrawing cannot retain the original editable form structure.
+    guard method != .redraw || !bake.preserveForms else { return }
     if let method {
       bake.method = method
     } else {
@@ -183,20 +208,31 @@ final class Oven: ObservableObject {
         () -> Result<(URL, String, String?), Error> in
         do {
           switch action {
-          case .bake:
+          case .bake, .removeAnnotations:
             let output = Destination.destination(
               for: input,
-              suffix: preferences.destination.suffix,
+              suffix: action == .removeAnnotations
+                ? Destination.cleanedSuffix : preferences.destination.suffix,
               folder: preferences.destination.folder,
               replace: preferences.destination.replace,
               protecting: protected
             )
-            let baked = try Baker.bake(input: input, to: output, options: preferences.bake)
+            let baked: BakeResult
+            if action == .removeAnnotations {
+              baked = try Baker.removeAnnotations(
+                input: input, to: output, optimize: preferences.bake.optimize,
+                preserveLinks: preferences.bake.preserveLinks,
+                preserveForms: preferences.bake.preserveForms,
+                qpdfExecutable: preferences.bake.qpdfExecutable)
+            } else {
+              baked = try Baker.bake(input: input, to: output, options: preferences.bake)
+            }
             var detail =
               ByteCountFormatter.string(fromByteCount: Int64(baked.inputBytes), countStyle: .file)
               + " → "
               + ByteCountFormatter.string(
                 fromByteCount: Int64(baked.outputBytes), countStyle: .file)
+            if action == .removeAnnotations { detail = "Annotations removed · " + detail }
             if baked.usedOptimizedFile { detail += " · losslessly compressed" }
             return .success((output, detail, baked.optimizationWarning))
           case .extract:
@@ -214,7 +250,7 @@ final class Oven: ObservableObject {
         }
       }.value
 
-      // The same file can be queued twice — once to bake, once to extract — so the entry is
+      // The same file can be queued for multiple actions, so the entry is
       // found again by its id; matching on the input alone would update the wrong one.
       guard let current = items.firstIndex(where: { $0.id == itemID }) else { continue }
       switch result {

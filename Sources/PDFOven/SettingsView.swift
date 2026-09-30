@@ -8,7 +8,6 @@ struct SettingsView: View {
   @AppStorage(Preference.revealWhenDone) private var revealWhenDone = false
   @AppStorage(Preference.flatteningMethod) private var flatteningMethod =
     FlatteningMethod.redraw.rawValue
-  @AppStorage(Preference.preserveLinks) private var preserveLinks = true
   @AppStorage(Preference.optimize) private var optimize = false
 
   private var selectedMethod: FlatteningMethod {
@@ -25,8 +24,7 @@ struct SettingsView: View {
       Text(selectedMethod.explanation)
         .font(.caption)
         .foregroundStyle(.secondary)
-      Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
-      Toggle("Losslessly compress with qpdf after baking", isOn: $optimize)
+      Toggle("Losslessly compress processed PDFs with qpdf", isOn: $optimize)
       Text(
         "Recompresses Flate streams and packs PDF objects. Images are never converted or downsampled."
       )
@@ -35,7 +33,7 @@ struct SettingsView: View {
 
       Divider()
 
-      TextField("Filename suffix:", text: $suffix, prompt: Text(Preference.defaultSuffix))
+      TextField("Baked filename suffix:", text: $suffix, prompt: Text(Preference.defaultSuffix))
         .frame(width: 160)
       LabeledContent("Save to:") {
         HStack {
@@ -56,7 +54,7 @@ struct SettingsView: View {
         }
       }
       Toggle("Replace an existing file with the same name", isOn: $replaceExisting)
-      Toggle("Reveal each baked file in Finder", isOn: $revealWhenDone)
+      Toggle("Reveal each result in Finder", isOn: $revealWhenDone)
       LabeledContent("Version:") {
         Text(AppVersion.display)
           .foregroundStyle(.secondary)
