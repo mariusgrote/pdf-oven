@@ -4,11 +4,36 @@ import SwiftUI
 struct ContentView: View {
   @EnvironmentObject private var oven: Oven
   @State private var isTargeted = false
+  @AppStorage(Preference.importAction) private var importAction = BakeItem.Action.bake.rawValue
+  @AppStorage(Preference.preserveLinks) private var preserveLinks = true
+  @AppStorage(Preference.preserveForms) private var preserveForms = false
+
+  private var removesAnnotations: Bool {
+    importAction == BakeItem.Action.removeAnnotations.rawValue
+  }
 
   var body: some View {
     VStack(spacing: 0) {
-      DropZone(isTargeted: isTargeted) { oven.add(FilePicker.chooseInputs()) }
-        .padding(20)
+      VStack(alignment: .leading, spacing: 10) {
+        Picker("When adding PDFs", selection: $importAction) {
+          Text("Bake").tag(BakeItem.Action.bake.rawValue)
+          Text("Remove").tag(BakeItem.Action.removeAnnotations.rawValue)
+        }
+        .pickerStyle(.segmented)
+        Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
+        Toggle("Keep form fields editable", isOn: $preserveForms)
+        if !removesAnnotations && preserveForms {
+          Text("Keeping editable forms uses content-preserving baking.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+      .toggleStyle(.checkbox)
+      .padding([.horizontal, .top], 20)
+      DropZone(isTargeted: isTargeted, removesAnnotations: removesAnnotations) {
+        oven.add(FilePicker.chooseInputs())
+      }
+      .padding(20)
 
       if !oven.items.isEmpty {
         Divider()
@@ -32,7 +57,7 @@ struct ContentView: View {
         } label: {
           Label("Open PDFs", systemImage: "plus")
         }
-        .help("Open PDFs to bake")
+        .help("Process PDFs using the selected action")
       }
       ToolbarItem(placement: .primaryAction) {
         Button {
@@ -58,6 +83,7 @@ struct ContentView: View {
 
 private struct DropZone: View {
   let isTargeted: Bool
+  let removesAnnotations: Bool
   let onClick: () -> Void
 
   var body: some View {
@@ -67,10 +93,14 @@ private struct DropZone: View {
         .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
       Text("Drop PDFs here")
         .font(.title3)
-      Text("Annotations are painted into the page and saved as a new file.")
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
+      Text(
+        removesAnnotations
+          ? "Annotations are removed and saved as a new PDF with the suffix _cleaned."
+          : "Annotations are painted into the page and saved as a new file."
+      )
+      .font(.callout)
+      .foregroundStyle(.secondary)
+      .multilineTextAlignment(.center)
       Button("Choose Files…", action: onClick)
         .padding(.top, 4)
     }
@@ -116,6 +146,8 @@ private struct BakeRow: View {
             Button("Use Compatibility redraw") {
               oven.retryAnnotation(item.id, using: .redraw)
             }
+            .disabled(item.preferences.bake.preserveForms)
+            .help("Compatibility redraw requires baking the form fields as well")
           }
           .buttonStyle(.borderless)
         }

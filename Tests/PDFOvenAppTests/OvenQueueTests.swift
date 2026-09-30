@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 import PDFOvenFixtures
 import PDFOvenKit
 import XCTest
@@ -47,7 +48,7 @@ final class OvenQueueTests: XCTestCase {
         return XCTFail("\(item.action) ended as \(item.status)")
       }
       switch item.action {
-      case .bake:
+      case .bake, .removeAnnotations:
         XCTAssertEqual(output.pathExtension, "pdf")
         XCTAssertNotEqual(output, input)
       case .extract:
@@ -212,6 +213,73 @@ final class OvenQueueTests: XCTestCase {
       return XCTFail("Accepted bake did not finish with a page reminder")
     }
     XCTAssertTrue(warning.contains("Check page \(page)"))
+  }
+
+  func testImportActionAndCheckboxesAreCapturedPerBatch() async throws {
+    let configured = ProcessInfo.processInfo.environment["PDFOVEN_TEST_QPDF"]
+    let candidates = [configured, "/usr/local/bin/qpdf", "/opt/homebrew/bin/qpdf"].compactMap { $0 }
+    guard let helper = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    else { throw XCTSkip("Set PDFOVEN_TEST_QPDF for the removal queue integration test") }
+    let defaults = UserDefaults.standard
+    let keys = [
+      Preference.importAction, Preference.preserveLinks, Preference.preserveForms,
+      Preference.optimize, Preference.flatteningMethod, Preference.suffix,
+      Preference.destinationFolder, Preference.replaceExisting, Preference.revealWhenDone,
+    ]
+    let previous = keys.map { defaults.object(forKey: $0) }
+    defer {
+      for (key, value) in zip(keys, previous) {
+        if let value {
+          defaults.set(value, forKey: key)
+        } else {
+          defaults.removeObject(forKey: key)
+        }
+      }
+    }
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("pdfoven-import-tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("input.pdf")
+    let data = FixturePDF.data()
+    try data.write(to: input)
+    defaults.set(false, forKey: Preference.optimize)
+    defaults.set(false, forKey: Preference.revealWhenDone)
+    defaults.set(false, forKey: Preference.replaceExisting)
+    defaults.set(directory.path, forKey: Preference.destinationFolder)
+    defaults.set("-custom-baked", forKey: Preference.suffix)
+    defaults.set(FlatteningMethod.redraw.rawValue, forKey: Preference.flatteningMethod)
+    defaults.set(BakeItem.Action.removeAnnotations.rawValue, forKey: Preference.importAction)
+    defaults.set(false, forKey: Preference.preserveLinks)
+    defaults.set(false, forKey: Preference.preserveForms)
+    let oven = Oven(qpdfExecutable: URL(fileURLWithPath: helper))
+    oven.add([input])
+    defaults.set(BakeItem.Action.bake.rawValue, forKey: Preference.importAction)
+    defaults.set(true, forKey: Preference.preserveLinks)
+    oven.add([input])
+    defaults.set(true, forKey: Preference.preserveForms)
+    XCTAssertEqual(oven.items.map(\.action), [.removeAnnotations, .bake])
+    XCTAssertFalse(oven.items[0].preferences.bake.preserveLinks)
+    XCTAssertTrue(oven.items[1].preferences.bake.preserveLinks)
+    XCTAssertFalse(oven.items[1].preferences.bake.preserveForms)
+    try await waitUntilIdle(oven)
+    let removed = try XCTUnwrap(oven.items[0].outputURL)
+    let baked = try XCTUnwrap(oven.items[1].outputURL)
+    XCTAssertEqual(removed.lastPathComponent, "input_cleaned.pdf")
+    XCTAssertEqual(baked.lastPathComponent, "input-custom-baked.pdf")
+    let clean = try XCTUnwrap(PDFDocument(url: removed))
+    for index in 0..<clean.pageCount {
+      XCTAssertTrue(try XCTUnwrap(clean.page(at: index)).annotations.isEmpty)
+    }
+    XCTAssertEqual(try Data(contentsOf: input), data)
+
+    defaults.set(BakeItem.Action.removeAnnotations.rawValue, forKey: Preference.importAction)
+    defaults.set(false, forKey: Preference.preserveLinks)
+    defaults.set(false, forKey: Preference.preserveForms)
+    oven.add([input])
+    try await waitUntilIdle(oven)
+    XCTAssertEqual(oven.items[2].outputURL?.lastPathComponent, "input_cleaned 2.pdf")
+    XCTAssertEqual(try Data(contentsOf: input), data)
   }
 
   private func waitUntilIdle(_ oven: Oven, timeout: TimeInterval = 30) async throws {

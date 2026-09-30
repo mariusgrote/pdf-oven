@@ -42,7 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum FilePicker {
   @MainActor
   static func chooseInputs() -> [URL] {
-    chooseInputs(message: "Choose PDFs to bake", prompt: "Bake")
+    let removing = Preference.selectedAction == .removeAnnotations
+    return chooseInputs(
+      message: removing ? "Choose PDFs to remove annotations from" : "Choose PDFs to bake",
+      prompt: removing ? "Remove Annotations" : "Bake")
   }
 
   @MainActor
@@ -67,7 +70,7 @@ enum FilePicker {
     panel.canChooseFiles = false
     panel.canChooseDirectories = true
     panel.canCreateDirectories = true
-    panel.message = "Choose where baked PDFs are saved"
+    panel.message = "Choose where processed PDFs are saved"
     panel.prompt = "Choose"
     return panel.runModal() == .OK ? panel.url : nil
   }

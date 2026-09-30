@@ -6,6 +6,237 @@ import XCTest
 @testable import PDFOvenKit
 
 final class BakerTests: XCTestCase {
+  func testRemovalDiscardsLockedAnnotationsWithoutPaintingThem() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("locked.pdf")
+    let output = directory.appendingPathComponent("removed.pdf")
+    // Locked and LockedContents restrict editor actions, not structural removal.
+    for flags in [4 | 128, 4 | 512, 4 | 64 | 128 | 512] {
+      for appearance in [BakingPDF.Appearance.stream, .none] {
+        let original = BakingPDF(appearance: appearance, annotationFlags: flags).data()
+        try original.write(to: input)
+        try Baker.removeAnnotations(input: input, to: output, qpdfExecutable: qpdf)
+        let source = try XCTUnwrap(CGPDFDocument(input as CFURL))
+        let result = try XCTUnwrap(CGPDFDocument(output as CFURL))
+        let page = try XCTUnwrap(result.page(at: 1))
+        XCTAssertTrue(PageImageScanner.annotations(of: page.dictionary).isEmpty)
+        XCTAssertEqual(try contentBytes(page), try contentBytes(XCTUnwrap(source.page(at: 1))))
+        XCTAssertEqual(try renderedColorCounts(page).red, 0)
+        XCTAssertEqual(try Data(contentsOf: input), original)
+      }
+    }
+  }
+
+  func testRemovalDiscardsAppearancesLinksAndFormsWhilePreservingContent() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fixtures = [
+      BakingPDF(link: true),
+      BakingPDF(hasForm: true, needsAppearances: true, link: true),
+      BakingPDF(appearance: .none, popup: true),
+      BakingPDF(directLink: true, rotation: 90, crop: "[20 30 180 190]"),
+    ]
+    for fixture in fixtures {
+      let input = directory.appendingPathComponent("input.pdf")
+      let original = fixture.data()
+      try original.write(to: input)
+      let source = try XCTUnwrap(CGPDFDocument(input as CFURL))
+      let sourcePage = try XCTUnwrap(source.page(at: 1))
+      for optimize in [false, true] {
+        let output = directory.appendingPathComponent("cleaned.pdf")
+        try Baker.removeAnnotations(
+          input: input, to: output, optimize: optimize, qpdfExecutable: qpdf)
+        let result = try XCTUnwrap(CGPDFDocument(output as CFURL))
+        let page = try XCTUnwrap(result.page(at: 1))
+        XCTAssertEqual(result.numberOfPages, source.numberOfPages)
+        XCTAssertTrue(PageImageScanner.annotations(of: page.dictionary).isEmpty)
+        var form: CGPDFDictionaryRef?
+        XCTAssertFalse(
+          CGPDFDictionaryGetDictionary(try XCTUnwrap(result.catalog), "AcroForm", &form))
+        XCTAssertEqual(page.rotationAngle, sourcePage.rotationAngle)
+        XCTAssertEqual(page.getBoxRect(.cropBox), sourcePage.getBoxRect(.cropBox))
+        XCTAssertEqual(try contentBytes(page), try contentBytes(sourcePage))
+        let colors = try renderedColorCounts(page)
+        XCTAssertGreaterThan(colors.dark, 100)
+        XCTAssertEqual(colors.red, 0, "Annotation appearance must not be painted")
+        XCTAssertEqual(try Data(contentsOf: input), original)
+      }
+    }
+  }
+
+  func testLinksAndEditableFormsCanBeKeptIndependentlyForBothActions() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("form-and-link.pdf")
+    for stale in [false, true] {
+      try BakingPDF(hasForm: true, needsAppearances: stale, link: true).data().write(to: input)
+      for removing in [false, true] {
+        for keepLinks in [false, true] {
+          for keepForms in [false, true] {
+            if !removing && stale && !keepForms { continue }
+            let output = directory.appendingPathComponent("output.pdf")
+            let optimize = keepForms
+            if removing {
+              try Baker.removeAnnotations(
+                input: input, to: output, optimize: optimize, preserveLinks: keepLinks,
+                preserveForms: keepForms,
+                qpdfExecutable: qpdf)
+            } else {
+              try Baker.bake(
+                input: input, to: output,
+                options: BakeOptions(
+                  method: .preserveContent, optimize: optimize, preserveLinks: keepLinks,
+                  preserveForms: keepForms,
+                  qpdfExecutable: qpdf))
+            }
+            let result = try XCTUnwrap(PDFDocument(url: output))
+            let annotations = try XCTUnwrap(result.page(at: 0)).annotations
+            XCTAssertEqual(annotations.filter { $0.type == "Link" }.count, keepLinks ? 1 : 0)
+            XCTAssertEqual(annotations.filter { $0.type == "Widget" }.count, keepForms ? 1 : 0)
+            if keepLinks {
+              XCTAssertEqual(
+                annotations.first { $0.type == "Link" }?.url?.absoluteString,
+                "https://example.com/test")
+            }
+            if keepForms {
+              let widget = try XCTUnwrap(annotations.first { $0.type == "Widget" })
+              XCTAssertEqual(widget.widgetStringValue, "Hello")
+              XCTAssertEqual(widget.fieldName, "Name")
+              XCTAssertFalse(widget.isReadOnly)
+              XCTAssertTrue(widget.shouldDisplay)
+              widget.widgetStringValue = "Changed"
+              let edited = directory.appendingPathComponent("edited.pdf")
+              XCTAssertTrue(result.write(to: edited))
+              let reopened = try XCTUnwrap(PDFDocument(url: edited))
+              XCTAssertEqual(
+                reopened.page(at: 0)?.annotations.first { $0.type == "Widget" }?.widgetStringValue,
+                "Changed")
+            }
+            let cg = try XCTUnwrap(CGPDFDocument(output as CFURL))
+            var form: CGPDFDictionaryRef?
+            XCTAssertEqual(
+              CGPDFDictionaryGetDictionary(try XCTUnwrap(cg.catalog), "AcroForm", &form), keepForms)
+            let colors = try renderedColorCounts(XCTUnwrap(cg.page(at: 1)))
+            if removing || keepForms {
+              XCTAssertEqual(colors.red, 0, "Retained forms must not also be painted")
+            } else {
+              XCTAssertGreaterThan(colors.red, 100, "Discarded form must be baked")
+            }
+          }
+        }
+      }
+    }
+  }
+
+  func testBakingRetainsFormTreeAndAppearanceWhileStillBakingOtherMarkup() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("mixed.pdf")
+    let original = BakingPDF(hasForm: true, link: true, extraMarkup: true).data()
+    try original.write(to: input)
+    let baked = directory.appendingPathComponent("baked.pdf")
+    let removed = directory.appendingPathComponent("removed.pdf")
+    try Baker.bake(
+      input: input, to: baked,
+      options: BakeOptions(preserveForms: true, qpdfExecutable: qpdf))
+    try Baker.removeAnnotations(
+      input: input, to: removed, preserveLinks: true, preserveForms: true,
+      qpdfExecutable: qpdf)
+    for output in [baked, removed] {
+      let document = try XCTUnwrap(PDFDocument(url: output))
+      let annotations = try XCTUnwrap(document.page(at: 0)).annotations
+      XCTAssertEqual(annotations.count, 2)
+      let widget = try XCTUnwrap(annotations.first { $0.type == "Widget" })
+      XCTAssertEqual(widget.widgetStringValue, "Hello")
+      let cg = try XCTUnwrap(CGPDFDocument(output as CFURL))
+      let page = try XCTUnwrap(cg.page(at: 1))
+      let source = try XCTUnwrap(CGPDFDocument(input as CFURL))
+      XCTAssertEqual(
+        try widgetAppearanceBytes(page), try widgetAppearanceBytes(XCTUnwrap(source.page(at: 1))))
+      let colors = try renderedColorCounts(page)
+      if output == baked {
+        XCTAssertGreaterThan(colors.red, 100)
+      } else {
+        XCTAssertEqual(colors.red, 0)
+      }
+    }
+    XCTAssertEqual(try Data(contentsOf: input), original)
+  }
+
+  func testKeepingFormsUsesContentPreservingBakingForEveryMethod() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("form.pdf")
+    try BakingPDF(appearance: .none, hasForm: true, needsAppearances: true).data().write(to: input)
+    for method in FlatteningMethod.allCases {
+      let output = directory.appendingPathComponent("output.pdf")
+      try Baker.bake(
+        input: input, to: output,
+        options: BakeOptions(method: method, preserveForms: true, qpdfExecutable: qpdf))
+      let document = try XCTUnwrap(PDFDocument(url: output))
+      XCTAssertEqual(document.page(at: 0)?.annotations.first?.widgetStringValue, "Hello")
+    }
+  }
+
+  func testRemovalFailuresProtectOriginalAndExistingOutput() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("input.pdf")
+    let original = BakingPDF().data()
+    try original.write(to: input)
+    XCTAssertThrowsError(
+      try Baker.removeAnnotations(input: input, to: input, qpdfExecutable: qpdf))
+    XCTAssertEqual(try Data(contentsOf: input), original)
+    let output = directory.appendingPathComponent("existing.pdf")
+    let sentinel = Data("existing output".utf8)
+    try sentinel.write(to: output)
+    XCTAssertThrowsError(
+      try Baker.removeAnnotations(
+        input: input, to: output,
+        qpdfExecutable: directory.appendingPathComponent("missing-qpdf")))
+    XCTAssertEqual(try Data(contentsOf: output), sentinel)
+    try Data("invalid PDF".utf8).write(to: input)
+    XCTAssertThrowsError(
+      try Baker.removeAnnotations(input: input, to: output, qpdfExecutable: qpdf))
+    XCTAssertEqual(try Data(contentsOf: output), sentinel)
+  }
+
+  private func widgetAppearanceBytes(_ page: CGPDFPage) throws -> Data {
+    var annotations: CGPDFArrayRef?
+    XCTAssertTrue(CGPDFDictionaryGetArray(try XCTUnwrap(page.dictionary), "Annots", &annotations))
+    let array = try XCTUnwrap(annotations)
+    for index in 0..<CGPDFArrayGetCount(array) {
+      var annotation: CGPDFDictionaryRef?
+      guard CGPDFArrayGetDictionary(array, index, &annotation), let annotation else { continue }
+      var subtype: UnsafePointer<CChar>?
+      guard CGPDFDictionaryGetName(annotation, "Subtype", &subtype), let subtype,
+        String(cString: subtype) == "Widget"
+      else { continue }
+      var appearance: CGPDFDictionaryRef?
+      XCTAssertTrue(CGPDFDictionaryGetDictionary(annotation, "AP", &appearance))
+      var normal: CGPDFStreamRef?
+      XCTAssertTrue(CGPDFDictionaryGetStream(try XCTUnwrap(appearance), "N", &normal))
+      var format = CGPDFDataFormat.raw
+      return try XCTUnwrap(CGPDFStreamCopyData(try XCTUnwrap(normal), &format)) as Data
+    }
+    XCTFail("No widget appearance found")
+    return Data()
+  }
+
+  private func contentBytes(_ page: CGPDFPage) throws -> Data {
+    var stream: CGPDFStreamRef?
+    XCTAssertTrue(CGPDFDictionaryGetStream(try XCTUnwrap(page.dictionary), "Contents", &stream))
+    var format = CGPDFDataFormat.raw
+    return try XCTUnwrap(CGPDFStreamCopyData(try XCTUnwrap(stream), &format)) as Data
+  }
+
   func testCompatibilityRedrawRemainsTheDefault() {
     XCTAssertEqual(BakeOptions().method, .redraw)
     XCTAssertFalse(BakeOptions().optimize)
@@ -614,6 +845,8 @@ private struct BakingPDF {
   var empty = false
   var rotation = 0
   var crop = "[0 0 200 200]"
+  var extraMarkup = false
+  var annotationFlags = 4
 
   func data() -> Data {
     let catalog = "<< /Type /Catalog /Pages 2 0 R" + (hasForm ? " /AcroForm 7 0 R" : "") + " >>"
@@ -622,7 +855,7 @@ private struct BakingPDF {
     let extraReference = directLink ? linkDictionary : (popup || hidden || link ? "8 0 R" : "")
     let page =
       "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
-      + "/CropBox \(crop) /Rotate \(rotation) /Resources << >> /Contents 4 0 R /Annots [5 0 R \(extraReference)] >>"
+      + "/CropBox \(crop) /Rotate \(rotation) /Resources << >> /Contents 4 0 R /Annots [5 0 R \(extraReference) \(extraMarkup ? "9 0 R" : "")] >>"
     let path = String(repeating: "10 10 m 190 190 l 10 190 m 190 10 l S\n", count: repetitions)
     let annotationType =
       hasForm
@@ -642,7 +875,7 @@ private struct BakingPDF {
       appearanceEntry = checkbox ? "/AP << /N << /Yes 6 0 R >> >>" : "/AP << /N 6 0 R >>"
     }
     let annotation =
-      "<< /Type /Annot \(annotationType) /Rect [40 40 90 90] /F 4 \(appearanceEntry) >>"
+      "<< /Type /Annot \(annotationType) /Rect [40 40 90 90] /F \(annotationFlags) \(appearanceEntry) >>"
     let appearanceStream = stream(
       dictionary: "/Type /XObject /Subtype /Form "
         + (appearance == .missingBoundingBox ? "" : "/BBox [0 0 50 50] ")
@@ -674,6 +907,12 @@ private struct BakingPDF {
           ? "/Subtype /Stamp /F 2"
           : "/Subtype /Link /Border [0 0 0] \(linkAppearance ? "/AP << /N 6 0 R >>" : "") /A << /S /URI /URI (https://example.com/test) >>")
       bodies.append(Data("<< /Type /Annot \(extra) /Rect [100 100 150 130] >>".utf8))
+    }
+    if extraMarkup {
+      while bodies.count < 8 { bodies.append(Data("null".utf8)) }
+      bodies.append(
+        Data(
+          "<< /Type /Annot /Subtype /Stamp /Rect [120 40 170 90] /F 4 /AP << /N 6 0 R >> >>".utf8))
     }
     return serialize(bodies)
   }

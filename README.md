@@ -3,8 +3,8 @@
 A small native macOS app that "bakes" PDF annotations into page content so they can no
 longer be selected, moved, or edited.
 
-It can also extract the image files stored inside a PDF, including images used by stamp
-annotations and image file attachments.
+It can also remove annotations without baking them, or extract the image files stored
+inside a PDF, including images used by stamp annotations and image file attachments.
 
 ## Build
 
@@ -29,8 +29,13 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
 
 ## Use
 
-- Drag PDFs (or folders of PDFs) onto the window, or press ⌘O.
-- Each file is saved next to the original as `name-baked.pdf`.
+- Select Bake or Remove in the main window, then drag PDFs (or folders of PDFs) onto it,
+  or press ⌘O. The selected action also applies to files opened through Finder.
+- The two checkboxes independently keep hyperlinks clickable and form fields editable.
+  Keeping forms retains their values. Each import keeps the choices from when it was added.
+- Bake saves each file next to the original as `name-baked.pdf`.
+- Remove saves `name_cleaned.pdf`. It discards markup and, unless their checkboxes are
+  enabled, hyperlinks and form fields with their values.
 - Use the Extract Images toolbar button or press ⌘E to write images to `name-images/`.
 - ⌘, opens Settings: baking method, optional lossless qpdf compression, filename suffix, a fixed
   output folder, whether to replace an existing file of the same name, and whether to reveal
@@ -43,7 +48,9 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
 The compatibility redraw remains the default. `Baker.bake` opens the document with PDFKit
 and draws each page into a new `CGPDFContext`. `PDFPage.draw(with:to:)` renders annotation
 appearances along with page content, and the new document contains no editable markup or form fields. Hyperlinks remain clickable
-by default. Turn off "Keep hyperlinks clickable" in Settings to discard them.
+by default. Turn off "Keep hyperlinks clickable" in the main window to discard them.
+Enable "Keep form fields editable" to retain the form widgets and their values. In that
+case, baking uses qpdf regardless of the method in Settings.
 
 Settings also offers two methods for comparing output on a particular document:
 
@@ -76,6 +83,20 @@ The following behavior describes the compatibility redraw:
   with an error rather than being unlocked.
 
 Originals are never modified.
+
+## Remove annotations
+
+Remove Annotations discards annotations instead of painting them into the page. It uses
+qpdf to remove page annotation entries and, when forms are not kept, the document's form
+tree while retaining the existing page content streams, images, geometry, and other document
+content. Already baked markup is part of the page content and cannot be removed by this action.
+
+The action uses the configured output folder, replacement policy, lossless compression,
+and Finder reveal setting. Its suffix is always `_cleaned`; the custom baking suffix applies
+only to baking. The checkboxes preserve links and editable forms independently for both actions.
+Originals remain protected, and existing output names are numbered when replacement is
+disabled. The result is validated for page count and absence of unwanted annotations and
+form structures before it is saved.
 
 ## Extract images from the command line
 

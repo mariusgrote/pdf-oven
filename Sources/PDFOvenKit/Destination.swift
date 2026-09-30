@@ -4,6 +4,8 @@ import Foundation
 public enum Destination {
   /// Appended to the stem when the caller gives no suffix of its own.
   public static let defaultSuffix = "-baked"
+  /// Appended to the stem when annotations are discarded.
+  public static let cleanedSuffix = "_cleaned"
   /// Appended to the stem for the folder an extraction fills.
   public static let imagesSuffix = "-images"
 
