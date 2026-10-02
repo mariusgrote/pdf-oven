@@ -29,14 +29,15 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
 
 ## Use
 
-- Select Bake or Remove in the main window, then drag PDFs (or folders of PDFs) onto it,
+- Select Bake, Remove, or Extract Images in the main window, then drag PDFs (or folders of PDFs) onto it,
   or press ⌘O. The selected action also applies to files opened through Finder.
-- The two checkboxes independently keep hyperlinks clickable and form fields editable.
+- For Bake and Remove, the two checkboxes independently keep hyperlinks clickable and form fields editable.
   Keeping forms retains their values. Each import keeps the choices from when it was added.
 - Bake saves each file next to the original as `name-baked.pdf`.
 - Remove saves `name_cleaned.pdf`. It discards markup and, unless their checkboxes are
   enabled, hyperlinks and form fields with their values.
-- Use the Extract Images toolbar button or press ⌘E to write images to `name-images/`.
+- Extract Images writes images to `name-images/`. Press ⌘E to extract directly regardless
+  of the selected action.
 - ⌘, opens Settings: baking method, optional lossless qpdf compression, filename suffix, a fixed
   output folder, whether to replace an existing file of the same name, and whether to reveal
   results in Finder.

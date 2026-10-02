@@ -42,10 +42,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum FilePicker {
   @MainActor
   static func chooseInputs() -> [URL] {
-    let removing = Preference.selectedAction == .removeAnnotations
-    return chooseInputs(
-      message: removing ? "Choose PDFs to remove annotations from" : "Choose PDFs to bake",
-      prompt: removing ? "Remove Annotations" : "Bake")
+    switch Preference.selectedAction {
+    case .bake:
+      return chooseInputs(message: "Choose PDFs to bake", prompt: "Bake")
+    case .removeAnnotations:
+      return chooseInputs(
+        message: "Choose PDFs to remove annotations from", prompt: "Remove Annotations")
+    case .extract:
+      return chooseExtractInputs()
+    }
   }
 
   @MainActor
