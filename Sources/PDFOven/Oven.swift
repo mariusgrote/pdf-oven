@@ -54,7 +54,7 @@ enum Preference {
 
   static var selectedAction: BakeItem.Action {
     let value = UserDefaults.standard.string(forKey: importAction)
-    return value == BakeItem.Action.removeAnnotations.rawValue ? .removeAnnotations : .bake
+    return value.flatMap(BakeItem.Action.init(rawValue:)) ?? .bake
   }
 
   static var snapshot: RunPreferences {

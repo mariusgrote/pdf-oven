@@ -8,8 +8,8 @@ struct ContentView: View {
   @AppStorage(Preference.preserveLinks) private var preserveLinks = true
   @AppStorage(Preference.preserveForms) private var preserveForms = false
 
-  private var removesAnnotations: Bool {
-    importAction == BakeItem.Action.removeAnnotations.rawValue
+  private var selectedAction: BakeItem.Action {
+    BakeItem.Action(rawValue: importAction) ?? .bake
   }
 
   var body: some View {
@@ -18,19 +18,22 @@ struct ContentView: View {
         Picker("When adding PDFs", selection: $importAction) {
           Text("Bake").tag(BakeItem.Action.bake.rawValue)
           Text("Remove").tag(BakeItem.Action.removeAnnotations.rawValue)
+          Text("Extract Images").tag(BakeItem.Action.extract.rawValue)
         }
         .pickerStyle(.segmented)
-        Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
-        Toggle("Keep form fields editable", isOn: $preserveForms)
-        if !removesAnnotations && preserveForms {
-          Text("Keeping editable forms uses content-preserving baking.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        if selectedAction != .extract {
+          Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
+          Toggle("Keep form fields editable", isOn: $preserveForms)
+          if selectedAction == .bake && preserveForms {
+            Text("Keeping editable forms uses content-preserving baking.")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
         }
       }
       .toggleStyle(.checkbox)
       .padding([.horizontal, .top], 20)
-      DropZone(isTargeted: isTargeted, removesAnnotations: removesAnnotations) {
+      DropZone(isTargeted: isTargeted, action: selectedAction) {
         oven.add(FilePicker.chooseInputs())
       }
       .padding(20)
@@ -59,14 +62,6 @@ struct ContentView: View {
         }
         .help("Process PDFs using the selected action")
       }
-      ToolbarItem(placement: .primaryAction) {
-        Button {
-          oven.extract(FilePicker.chooseExtractInputs())
-        } label: {
-          Label("Extract Images", systemImage: "photo.on.rectangle.angled")
-        }
-        .help("Extract embedded images from PDFs")
-      }
       ToolbarItem {
         Button {
           oven.clear()
@@ -83,24 +78,31 @@ struct ContentView: View {
 
 private struct DropZone: View {
   let isTargeted: Bool
-  let removesAnnotations: Bool
+  let action: BakeItem.Action
   let onClick: () -> Void
+
+  private var explanation: String {
+    switch action {
+    case .bake:
+      return "Annotations are painted into the page and saved as a new file."
+    case .removeAnnotations:
+      return "Annotations are removed and saved as a new PDF with the suffix _cleaned."
+    case .extract:
+      return "Embedded images are extracted and saved in a folder named name-images."
+    }
+  }
 
   var body: some View {
     VStack(spacing: 10) {
-      Image(systemName: "doc.on.doc")
+      Image(systemName: action == .extract ? "photo.on.rectangle.angled" : "doc.on.doc")
         .font(.system(size: 40, weight: .light))
         .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
       Text("Drop PDFs here")
         .font(.title3)
-      Text(
-        removesAnnotations
-          ? "Annotations are removed and saved as a new PDF with the suffix _cleaned."
-          : "Annotations are painted into the page and saved as a new file."
-      )
-      .font(.callout)
-      .foregroundStyle(.secondary)
-      .multilineTextAlignment(.center)
+      Text(explanation)
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
       Button("Choose Files…", action: onClick)
         .padding(.top, 4)
     }

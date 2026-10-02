@@ -258,7 +258,10 @@ final class OvenQueueTests: XCTestCase {
     defaults.set(true, forKey: Preference.preserveLinks)
     oven.add([input])
     defaults.set(true, forKey: Preference.preserveForms)
-    XCTAssertEqual(oven.items.map(\.action), [.removeAnnotations, .bake])
+    defaults.set(BakeItem.Action.extract.rawValue, forKey: Preference.importAction)
+    oven.add([input])
+    defaults.set(BakeItem.Action.bake.rawValue, forKey: Preference.importAction)
+    XCTAssertEqual(oven.items.map(\.action), [.removeAnnotations, .bake, .extract])
     XCTAssertFalse(oven.items[0].preferences.bake.preserveLinks)
     XCTAssertTrue(oven.items[1].preferences.bake.preserveLinks)
     XCTAssertFalse(oven.items[1].preferences.bake.preserveForms)
@@ -267,6 +270,9 @@ final class OvenQueueTests: XCTestCase {
     let baked = try XCTUnwrap(oven.items[1].outputURL)
     XCTAssertEqual(removed.lastPathComponent, "input_cleaned.pdf")
     XCTAssertEqual(baked.lastPathComponent, "input-custom-baked.pdf")
+    let extracted = try XCTUnwrap(oven.items[2].outputURL)
+    XCTAssertEqual(extracted.lastPathComponent, "input-images")
+    XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: extracted.path).isEmpty)
     let clean = try XCTUnwrap(PDFDocument(url: removed))
     for index in 0..<clean.pageCount {
       XCTAssertTrue(try XCTUnwrap(clean.page(at: index)).annotations.isEmpty)
@@ -278,7 +284,7 @@ final class OvenQueueTests: XCTestCase {
     defaults.set(false, forKey: Preference.preserveForms)
     oven.add([input])
     try await waitUntilIdle(oven)
-    XCTAssertEqual(oven.items[2].outputURL?.lastPathComponent, "input_cleaned 2.pdf")
+    XCTAssertEqual(oven.items[3].outputURL?.lastPathComponent, "input_cleaned 2.pdf")
     XCTAssertEqual(try Data(contentsOf: input), data)
   }
 
