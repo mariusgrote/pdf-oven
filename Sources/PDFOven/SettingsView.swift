@@ -1,40 +1,13 @@
-import PDFOvenKit
 import SwiftUI
 
+/// Shared output preferences that apply to every action.
 struct SettingsView: View {
-  @AppStorage(Preference.suffix) private var suffix = Preference.defaultSuffix
   @AppStorage(Preference.destinationFolder) private var destinationFolder = ""
   @AppStorage(Preference.replaceExisting) private var replaceExisting = false
   @AppStorage(Preference.revealWhenDone) private var revealWhenDone = false
-  @AppStorage(Preference.flatteningMethod) private var flatteningMethod =
-    FlatteningMethod.redraw.rawValue
-  @AppStorage(Preference.optimize) private var optimize = false
-
-  private var selectedMethod: FlatteningMethod {
-    FlatteningMethod(rawValue: flatteningMethod) ?? .redraw
-  }
 
   var body: some View {
     Form {
-      Picker("Flattening method:", selection: $flatteningMethod) {
-        ForEach(FlatteningMethod.allCases, id: \.rawValue) { method in
-          Text(method.title).tag(method.rawValue)
-        }
-      }
-      Text(selectedMethod.explanation)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      Toggle("Losslessly compress processed PDFs with qpdf", isOn: $optimize)
-      Text(
-        "Recompresses Flate streams and packs PDF objects. Images are never converted or downsampled."
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
-
-      Divider()
-
-      TextField("Baked filename suffix:", text: $suffix, prompt: Text(Preference.defaultSuffix))
-        .frame(width: 160)
       LabeledContent("Save to:") {
         HStack {
           Text(
@@ -45,6 +18,7 @@ struct SettingsView: View {
           .foregroundStyle(.secondary)
           .lineLimit(1)
           .truncationMode(.middle)
+          .help(destinationFolder.isEmpty ? "Alongside the original" : destinationFolder)
           Spacer()
           Button("Choose…") {
             if let url = FilePicker.chooseFolder() { destinationFolder = url.path }
@@ -53,8 +27,16 @@ struct SettingsView: View {
             .disabled(destinationFolder.isEmpty)
         }
       }
-      Toggle("Replace an existing file with the same name", isOn: $replaceExisting)
+      Toggle("Replace existing results with the same name", isOn: $replaceExisting)
+      Text(
+        "For image extraction, replacement reuses an existing folder and replaces matching image files. Results from the current run always receive distinct names."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
       Toggle("Reveal each result in Finder", isOn: $revealWhenDone)
+      Text("These settings apply to all actions and newly added PDFs.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
       LabeledContent("Version:") {
         Text(AppVersion.display)
           .foregroundStyle(.secondary)
@@ -64,34 +46,4 @@ struct SettingsView: View {
     .formStyle(.grouped)
     .frame(width: 520)
   }
-}
-
-extension FlatteningMethod {
-  fileprivate var title: String {
-    switch self {
-    case .preserveContent: return "Flatten into page content (qpdf)"
-    case .pdfKit: return "Native macOS burn-in (PDFKit)"
-    case .redraw: return "Compatibility redraw (PDFKit)"
-    }
-  }
-
-  fileprivate var explanation: String {
-    switch self {
-    case .preserveContent:
-      return
-        "Adds annotation appearances to the existing page content without redrawing the full page."
-    case .pdfKit:
-      return "Uses macOS to bake annotations into page content. File size may increase."
-    case .redraw:
-      return
-        "The original PDF Oven method. Draws every page into a new PDF and may make drawings much larger."
-    }
-  }
-}
-
-/// Reads what build.sh stamped into the bundle, so the app reports the released version.
-enum AppVersion {
-  static let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-  static let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-  static var display: String { "\(short) (\(build))" }
 }

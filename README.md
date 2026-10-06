@@ -29,17 +29,27 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
 
 ## Use
 
-- Select Bake or Remove in the main window, then drag PDFs (or folders of PDFs) onto it,
+- Select Bake, Remove, or Extract Images in the main window, then drag PDFs (or folders of PDFs) onto it,
   or press ⌘O. The selected action also applies to files opened through Finder.
-- The two checkboxes independently keep hyperlinks clickable and form fields editable.
+- For Bake and Remove, the two checkboxes independently keep hyperlinks clickable and form fields editable.
   Keeping forms retains their values. Each import keeps the choices from when it was added.
 - Bake saves each file next to the original as `name-baked.pdf`.
 - Remove saves `name_cleaned.pdf`. It discards markup and, unless their checkboxes are
   enabled, hyperlinks and form fields with their values.
-- Use the Extract Images toolbar button or press ⌘E to write images to `name-images/`.
-- ⌘, opens Settings: baking method, optional lossless qpdf compression, filename suffix, a fixed
-  output folder, whether to replace an existing file of the same name, and whether to reveal
-  results in Finder.
+- Extract Images writes images to `name-images/`. Press ⌘E to extract directly regardless
+  of the selected action.
+- Use "Extraction options" below the drop zone to set the minimum width/height and file size, combine duplicates,
+  or include images from annotations and attachments. Set either minimum to 0 to disable its filter.
+  Each import keeps the options from when it was added. Results report duplicate, too-small,
+  and unreadable images separately. Unreadable images produce a warning with expandable details.
+- Overlapping folder/file selections and symlinks to the same PDF are imported once per action.
+  Completed files can be imported again. Outputs in the current list receive distinct names,
+  even when replacement is enabled. Clear the list to start a new run with fresh reservations.
+- Options below the drop zone show the controls for the selected action: baking method and
+  filename suffix for Bake, link/form preservation and lossless compression for Bake and Remove,
+  and image filters for Extract Images.
+- ⌘, opens Settings for the shared output folder, replacement policy, and Finder reveal.
+  These preferences apply to every action.
 - The app registers as a PDF handler, so you can also drop files on its Dock icon or use
   "Open With".
 
@@ -50,9 +60,9 @@ and draws each page into a new `CGPDFContext`. `PDFPage.draw(with:to:)` renders 
 appearances along with page content, and the new document contains no editable markup or form fields. Hyperlinks remain clickable
 by default. Turn off "Keep hyperlinks clickable" in the main window to discard them.
 Enable "Keep form fields editable" to retain the form widgets and their values. In that
-case, baking uses qpdf regardless of the method in Settings.
+case, baking uses qpdf regardless of the selected baking method.
 
-Settings also offers two methods for comparing output on a particular document:
+The baking method menu also offers two methods for comparing output on a particular document:
 
 - Native macOS burn-in uses PDFKit's annotation burn-in write option.
 - qpdf flattening inserts existing annotation appearance streams into the page content without
@@ -118,7 +128,10 @@ Every path is checked before anything is written: one that does not exist, a fil
 a PDF, or a folder holding no PDFs ends the call with exit status 2 and no output at all, so a
 mistyped argument cannot leave a half-finished run behind. A PDF that exists but cannot be
 opened is a failure of the run, not of the call: the other inputs are still extracted and the
-exit status is 1.
+exit status is 1. An extraction with unreadable image occurrences also exits with status 1,
+retains the images it could write, and reports the missing occurrences on stderr. The summary
+separates duplicates, size-filtered images, and unreadable images. Same-named inputs from different
+folders receive separate output folders within the call, including with `--replace`.
 
 ## Contributing
 

@@ -98,6 +98,8 @@ private func read(_ arguments: [String], relativeTo directory: URL) throws -> Ex
     }
   }
 
+  var seen: Set<String> = []
+  parsed.inputs = parsed.inputs.filter { seen.insert(Destination.identity(of: $0)).inserted }
   guard !parsed.inputs.isEmpty else { throw Stop.failure("no PDFs to read\n\n\(usage)") }
   return parsed
 }

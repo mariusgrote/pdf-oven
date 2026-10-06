@@ -14,6 +14,10 @@ enum Preference {
   static let preserveLinks = "preserveLinks"
   static let preserveForms = "preserveForms"
   static let importAction = "importAction"
+  static let extractMinPixels = "extractMinPixels"
+  static let extractMinBytes = "extractMinBytes"
+  static let extractDedupe = "extractDedupe"
+  static let extractIncludeMarkup = "extractIncludeMarkup"
 
   static var defaultSuffix: String { Destination.defaultSuffix }
 
@@ -27,6 +31,10 @@ enum Preference {
       preserveLinks: true,
       preserveForms: false,
       importAction: BakeItem.Action.bake.rawValue,
+      extractMinPixels: 32,
+      extractMinBytes: 1024,
+      extractDedupe: true,
+      extractIncludeMarkup: true,
     ])
   }
 
@@ -35,7 +43,9 @@ enum Preference {
     let defaults = UserDefaults.standard
     return Options(
       suffix: defaults.string(forKey: suffix) ?? defaultSuffix,
-      folder: defaults.string(forKey: destinationFolder).map { URL(fileURLWithPath: $0) },
+      folder: defaults.string(forKey: destinationFolder).flatMap {
+        $0.isEmpty ? nil : URL(fileURLWithPath: $0)
+      },
       replace: defaults.bool(forKey: replaceExisting)
     )
   }
@@ -52,15 +62,26 @@ enum Preference {
     )
   }
 
+  static var extractOptions: ExtractOptions {
+    let defaults = UserDefaults.standard
+    return ExtractOptions(
+      includeMarkup: defaults.object(forKey: extractIncludeMarkup) as? Bool ?? true,
+      dedupe: defaults.object(forKey: extractDedupe) as? Bool ?? true,
+      minPixelSize: max(0, defaults.object(forKey: extractMinPixels) as? Int ?? 32),
+      minByteSize: max(0, defaults.object(forKey: extractMinBytes) as? Int ?? 1024)
+    )
+  }
+
   static var selectedAction: BakeItem.Action {
     let value = UserDefaults.standard.string(forKey: importAction)
-    return value == BakeItem.Action.removeAnnotations.rawValue ? .removeAnnotations : .bake
+    return value.flatMap(BakeItem.Action.init(rawValue:)) ?? .bake
   }
 
   static var snapshot: RunPreferences {
     RunPreferences(
       destination: options,
       bake: bakeOptions,
+      extract: extractOptions,
       reveal: UserDefaults.standard.bool(forKey: revealWhenDone)
     )
   }
@@ -69,6 +90,7 @@ enum Preference {
 struct RunPreferences: Sendable {
   let destination: Options
   let bake: BakeOptions
+  let extract: ExtractOptions
   let reveal: Bool
 }
 
@@ -126,6 +148,7 @@ final class Oven: ObservableObject {
   /// The tail of the drain chain. Every `add` links a new drain behind the last one, so a
   /// file added while a drain is finishing is picked up by the drain that follows it.
   private var drain: Task<Void, Never>?
+  private var reservedOutputs: [URL] = []
   private let qpdfExecutable: URL?
 
   /// Tests may inject a helper; the app uses the bundled executable.
@@ -140,22 +163,25 @@ final class Oven: ObservableObject {
   func clear() {
     guard !isBaking else { return }
     items.removeAll()
+    reservedOutputs.removeAll()
   }
 
   /// Accepts files and folders; folders are searched (one level deep and below) for PDFs.
   func add(_ urls: [URL], action requestedAction: BakeItem.Action? = nil) {
     let action = requestedAction ?? Preference.selectedAction
-    let pdfs = urls.flatMap(Destination.expand(_:)).filter { url in
-      !items.contains {
-        $0.input == url && $0.action == action && $0.status.isPending
-      }
+    var seen = Set(
+      items.filter { $0.action == action && $0.status.isPending }
+        .map { Destination.identity(of: $0.input) })
+    let pdfs = urls.flatMap(Destination.expand(_:)).filter {
+      seen.insert(Destination.identity(of: $0)).inserted
     }
     guard !pdfs.isEmpty else { return }
     let snapshot = Preference.snapshot
     var bake = snapshot.bake
     bake.qpdfExecutable = qpdfExecutable
     let preferences = RunPreferences(
-      destination: snapshot.destination, bake: bake, reveal: snapshot.reveal)
+      destination: snapshot.destination, bake: bake, extract: snapshot.extract,
+      reveal: snapshot.reveal)
     items.append(
       contentsOf: pdfs.map {
         BakeItem(input: $0, action: action, preferences: preferences)
@@ -180,7 +206,8 @@ final class Oven: ObservableObject {
     }
     let previous = items[index].preferences
     items[index].preferences = RunPreferences(
-      destination: previous.destination, bake: bake, reveal: previous.reveal)
+      destination: previous.destination, bake: bake, extract: previous.extract,
+      reveal: previous.reveal)
     items[index].annotationPageToCheck = method == nil ? page : nil
     items[index].status = .waiting
     scheduleDrain()
@@ -204,19 +231,27 @@ final class Oven: ObservableObject {
       items[index].status = .working
       // Every file still in the list is an input of this run and must not be written over.
       let protected = items.map(\.input)
+      let reserved = reservedOutputs
+      let output: URL
+      if action == .extract {
+        output = Destination.imagesFolder(
+          for: input, folder: preferences.destination.folder,
+          replace: preferences.destination.replace, protecting: protected, reserving: reserved)
+      } else {
+        output = Destination.destination(
+          for: input,
+          suffix: action == .removeAnnotations
+            ? Destination.cleanedSuffix : preferences.destination.suffix,
+          folder: preferences.destination.folder, replace: preferences.destination.replace,
+          protecting: protected, reserving: reserved)
+      }
+      // Reserve before processing, including failed runs that may have written partial images.
+      reservedOutputs.append(output)
       let result = await Task.detached(priority: .userInitiated) {
         () -> Result<(URL, String, String?), Error> in
         do {
           switch action {
           case .bake, .removeAnnotations:
-            let output = Destination.destination(
-              for: input,
-              suffix: action == .removeAnnotations
-                ? Destination.cleanedSuffix : preferences.destination.suffix,
-              folder: preferences.destination.folder,
-              replace: preferences.destination.replace,
-              protecting: protected
-            )
             let baked: BakeResult
             if action == .removeAnnotations {
               baked = try Baker.removeAnnotations(
@@ -236,14 +271,14 @@ final class Oven: ObservableObject {
             if baked.usedOptimizedFile { detail += " · losslessly compressed" }
             return .success((output, detail, baked.optimizationWarning))
           case .extract:
-            let extracted = try ImageExtractor().extract(
-              input, options: preferences.destination, protecting: protected)
+            let extracted = try ImageExtractor(extractOptions: preferences.extract).extract(
+              input, options: preferences.destination, protecting: protected, reserving: reserved)
             var detail =
               "\(extracted.written) image\(extracted.written == 1 ? "" : "s") · "
               + ByteCountFormatter.string(
                 fromByteCount: Int64(extracted.bytes), countStyle: .file)
-            if extracted.skipped > 0 { detail += " · \(extracted.skipped) skipped" }
-            return .success((extracted.folder, detail, nil))
+            if !extracted.skippedSummary.isEmpty { detail += " · " + extracted.skippedSummary }
+            return .success((extracted.folder, detail, extracted.warning))
           }
         } catch {
           return .failure(error)
@@ -259,8 +294,10 @@ final class Oven: ObservableObject {
         if let page = annotationPageToCheck {
           warnings.append("Check page \(page) in the saved PDF. The annotation may be missing.")
         }
-        if let compressionError = completion.2 {
-          warnings.append("Saved uncompressed. Compression failed: \(compressionError)")
+        if let warning = completion.2 {
+          warnings.append(
+            action == .extract
+              ? warning : "Saved uncompressed. Compression failed: \(warning)")
         }
         if !warnings.isEmpty {
           items[current].status = .doneWithWarning(

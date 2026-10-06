@@ -12,17 +12,20 @@ public enum Destination {
   /// Picks an output URL for `input`, honouring the caller's suffix, folder and replace
   /// preferences. `protecting` lists files the output must never land on — the input
   /// itself is always protected, so an operation can't overwrite what it is reading.
+  /// `reserving` lists outputs already claimed by this run, even when replacement is enabled.
   public static func destination(
     for input: URL,
     suffix: String,
     folder: URL?,
     replace: Bool,
-    protecting others: [URL] = []
+    protecting others: [URL] = [],
+    reserving outputs: [URL] = []
   ) -> URL {
     let directory = folder ?? input.deletingLastPathComponent()
     let stem = input.deletingPathExtension().lastPathComponent
     let trimmed = suffix.trimmingCharacters(in: .whitespaces)
     let protected = Set(([input] + others).map(identity(of:)))
+    let reserved = Set(outputs.map(identity(of:)))
 
     func candidate(_ base: String) -> URL {
       directory.appendingPathComponent(stem + base).appendingPathExtension("pdf")
@@ -37,11 +40,16 @@ public enum Destination {
       output = candidate(base)
     }
     // Replacing is the user's choice for *existing* files, never for an input of this run.
-    if replace && !protected.contains(identity(of: output)) { return output }
+    if replace && !protected.contains(identity(of: output))
+      && !reserved.contains(identity(of: output))
+    {
+      return output
+    }
 
     var counter = 2
     while FileManager.default.fileExists(atPath: output.path)
       || protected.contains(identity(of: output))
+      || reserved.contains(identity(of: output))
     {
       output = candidate("\(base) \(counter)")
       counter += 1
@@ -54,16 +62,18 @@ public enum Destination {
   ///
   /// `replace` means "write into a folder that is already there", never "delete it first": a
   /// folder collision can clobber a whole user directory, which is worse than clobbering one
-  /// file. A candidate that holds any protected input is numbered around regardless.
+  /// file. A candidate that holds any protected input or reserved output is numbered around
+  /// regardless of replacement.
   public static func imagesFolder(
     for input: URL,
     folder: URL?,
     replace: Bool,
-    protecting others: [URL] = []
+    protecting others: [URL] = [],
+    reserving outputs: [URL] = []
   ) -> URL {
     let directory = folder ?? input.deletingLastPathComponent()
     let stem = input.deletingPathExtension().lastPathComponent
-    let protected = ([input] + others).map(identity(of:))
+    let protected = ([input] + others + outputs).map(identity(of:))
 
     func candidate(_ base: String) -> URL {
       directory.appendingPathComponent(stem + base)
@@ -102,8 +112,8 @@ public enum Destination {
     }
   }
 
-  /// Two URLs name the same file if they resolve to the same path.
-  private static func identity(of url: URL) -> String {
+  /// Canonical path used for input deduplication and output reservations.
+  public static func identity(of url: URL) -> String {
     url.resolvingSymlinksInPath().standardizedFileURL.path
   }
 }

@@ -15,6 +15,10 @@ final class ImageExtractorTests: XCTestCase {
     XCTAssertEqual(result.written, FixturePDF.Expectation.writtenFiles)
     // The 4x4 spacer, and the two repeats of the logo that dedupe folds onto its first file.
     XCTAssertEqual(result.skipped, 3)
+    XCTAssertEqual(result.duplicates, 2)
+    XCTAssertEqual(result.tooSmall, 1)
+    XCTAssertEqual(result.unreadable, 0)
+    XCTAssertNil(result.warning)
 
     let files = try FileManager.default.contentsOfDirectory(
       at: result.folder, includingPropertiesForKeys: nil)
@@ -113,6 +117,24 @@ final class ImageExtractorTests: XCTestCase {
     XCTAssertEqual(result.written, 7)
     XCTAssertEqual(result.skipped, 3)
     XCTAssertEqual(files.count, result.written)
+  }
+
+  func testBatchRunReservesImageFoldersWithReplaceEnabled() throws {
+    let fixture = try makeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let nested = fixture.directory.appendingPathComponent("nested", isDirectory: true)
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    let second = nested.appendingPathComponent("fixture.pdf")
+    try FixturePDF.data().write(to: second)
+    let outputs = try ImageExtractor().run(
+      inputs: [fixture.input, second],
+      options: Options(
+        folder: fixture.directory.appendingPathComponent("output"), replace: true))
+    XCTAssertEqual(
+      outputs.map { $0.output.lastPathComponent }, ["fixture-images", "fixture-images 2"])
+    for result in outputs {
+      XCTAssertEqual(try countFiles(in: result.output), FixturePDF.Expectation.writtenFiles)
+    }
   }
 
   private func countFiles(in folder: URL) throws -> Int {

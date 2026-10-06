@@ -5,35 +5,37 @@ struct ContentView: View {
   @EnvironmentObject private var oven: Oven
   @State private var isTargeted = false
   @AppStorage(Preference.importAction) private var importAction = BakeItem.Action.bake.rawValue
-  @AppStorage(Preference.preserveLinks) private var preserveLinks = true
-  @AppStorage(Preference.preserveForms) private var preserveForms = false
-
-  private var removesAnnotations: Bool {
-    importAction == BakeItem.Action.removeAnnotations.rawValue
+  private var selectedAction: BakeItem.Action {
+    BakeItem.Action(rawValue: importAction) ?? .bake
   }
 
   var body: some View {
-    VStack(spacing: 0) {
+    VStack(alignment: .leading, spacing: 0) {
       VStack(alignment: .leading, spacing: 10) {
+        Text("When adding PDFs")
         Picker("When adding PDFs", selection: $importAction) {
           Text("Bake").tag(BakeItem.Action.bake.rawValue)
           Text("Remove").tag(BakeItem.Action.removeAnnotations.rawValue)
+          Text("Extract Images").tag(BakeItem.Action.extract.rawValue)
         }
         .pickerStyle(.segmented)
-        Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
-        Toggle("Keep form fields editable", isOn: $preserveForms)
-        if !removesAnnotations && preserveForms {
-          Text("Keeping editable forms uses content-preserving baking.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
+        .labelsHidden()
       }
-      .toggleStyle(.checkbox)
+      .frame(maxWidth: 520, alignment: .leading)
+      .frame(maxWidth: .infinity, alignment: .leading)
       .padding([.horizontal, .top], 20)
-      DropZone(isTargeted: isTargeted, removesAnnotations: removesAnnotations) {
-        oven.add(FilePicker.chooseInputs())
+
+      ScrollView {
+        VStack(alignment: .leading, spacing: 20) {
+          DropZone(isTargeted: isTargeted, action: selectedAction) {
+            oven.add(FilePicker.chooseInputs())
+          }
+          ProcessingOptionsView(action: selectedAction)
+            .frame(maxWidth: 520, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(20)
       }
-      .padding(20)
 
       if !oven.items.isEmpty {
         Divider()
@@ -44,6 +46,7 @@ struct ContentView: View {
         .frame(minHeight: 120)
       }
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .dropDestination(for: URL.self) { urls, _ in
       oven.add(urls)
       return true
@@ -58,14 +61,6 @@ struct ContentView: View {
           Label("Open PDFs", systemImage: "plus")
         }
         .help("Process PDFs using the selected action")
-      }
-      ToolbarItem(placement: .primaryAction) {
-        Button {
-          oven.extract(FilePicker.chooseExtractInputs())
-        } label: {
-          Label("Extract Images", systemImage: "photo.on.rectangle.angled")
-        }
-        .help("Extract embedded images from PDFs")
       }
       ToolbarItem {
         Button {
@@ -83,24 +78,31 @@ struct ContentView: View {
 
 private struct DropZone: View {
   let isTargeted: Bool
-  let removesAnnotations: Bool
+  let action: BakeItem.Action
   let onClick: () -> Void
+
+  private var explanation: String {
+    switch action {
+    case .bake:
+      return "Annotations are painted into the page and saved as a new file."
+    case .removeAnnotations:
+      return "Annotations are removed and saved as a new PDF with the suffix _cleaned."
+    case .extract:
+      return "Embedded images are extracted and saved in a folder named name-images."
+    }
+  }
 
   var body: some View {
     VStack(spacing: 10) {
-      Image(systemName: "doc.on.doc")
+      Image(systemName: action == .extract ? "photo.on.rectangle.angled" : "doc.on.doc")
         .font(.system(size: 40, weight: .light))
         .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
       Text("Drop PDFs here")
         .font(.title3)
-      Text(
-        removesAnnotations
-          ? "Annotations are removed and saved as a new PDF with the suffix _cleaned."
-          : "Annotations are painted into the page and saved as a new file."
-      )
-      .font(.callout)
-      .foregroundStyle(.secondary)
-      .multilineTextAlignment(.center)
+      Text(explanation)
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
       Button("Choose Files…", action: onClick)
         .padding(.top, 4)
     }
@@ -138,6 +140,13 @@ private struct BakeRow: View {
           .lineLimit(2)
           .truncationMode(.middle)
           .help(subtitle)
+        if hasWarning {
+          DisclosureGroup("Details") {
+            Text(subtitle)
+              .font(.caption)
+              .textSelection(.enabled)
+          }
+        }
         if case .annotationDecision = item.status {
           HStack {
             Button("Continue flattening") {

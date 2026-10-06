@@ -49,13 +49,44 @@ final class ExitCodeTests: XCTestCase {
       run.errors.contains("pdfoven: broken.pdf is not a readable PDF."), run.errors)
   }
 
+  func testReplaceKeepsSameBasenameExtractionsSeparate() throws {
+    for name in ["a", "b"] {
+      let folder = directory.appendingPathComponent(name, isDirectory: true)
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      try FixturePDF.data().write(to: folder.appendingPathComponent("plan.pdf"))
+    }
+    let run = try pdfoven("extract", "--replace", "--out", "output", "a/plan.pdf", "b/plan.pdf")
+    XCTAssertEqual(run.status, 0, run.errors)
+    for name in ["plan-images", "plan-images 2"] {
+      let folder = directory.appendingPathComponent("output/\(name)")
+      XCTAssertEqual(
+        try FileManager.default.contentsOfDirectory(atPath: folder.path).count,
+        FixturePDF.Expectation.writtenFiles)
+    }
+  }
+
+  func testUnreadableImageReportsPartialExtractionAndExitsOne() throws {
+    var data = FixturePDF.data()
+    let range = try XCTUnwrap(data.range(of: Data("/Width 4 /Height 4".utf8)))
+    data.replaceSubrange(range, with: Data("/Width 0 /Height 4".utf8))
+    try data.write(to: directory.appendingPathComponent("fixture.pdf"))
+    let run = try pdfoven("extract", "fixture.pdf")
+    XCTAssertEqual(run.status, 1)
+    XCTAssertTrue(run.errors.contains("1 image occurrence could not be extracted."), run.errors)
+    XCTAssertTrue(run.output.contains("2 duplicates"), run.output)
+    XCTAssertTrue(run.output.contains("1 unreadable"), run.output)
+    XCTAssertTrue(exists("fixture-images/p001-01.jpg"))
+  }
+
   // MARK: - Helpers
 
   private func exists(_ name: String) -> Bool {
     FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path)
   }
 
-  private func pdfoven(_ arguments: String...) throws -> (status: Int32, errors: String) {
+  private func pdfoven(_ arguments: String...) throws -> (
+    status: Int32, errors: String, output: String
+  ) {
     let binary = Bundle(for: type(of: self)).bundleURL
       .deletingLastPathComponent()
       .appendingPathComponent("PDFOvenCLI")
@@ -68,11 +99,16 @@ final class ExitCodeTests: XCTestCase {
     process.arguments = arguments
     process.currentDirectoryURL = directory
     let errors = Pipe()
-    process.standardOutput = Pipe()
+    let output = Pipe()
+    process.standardOutput = output
     process.standardError = errors
     try process.run()
     let written = errors.fileHandleForReading.readDataToEndOfFile()
+    let summary = output.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
-    return (process.terminationStatus, String(decoding: written, as: UTF8.self))
+    return (
+      process.terminationStatus, String(decoding: written, as: UTF8.self),
+      String(decoding: summary, as: UTF8.self)
+    )
   }
 }
