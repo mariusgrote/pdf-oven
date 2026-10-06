@@ -5,38 +5,37 @@ struct ContentView: View {
   @EnvironmentObject private var oven: Oven
   @State private var isTargeted = false
   @AppStorage(Preference.importAction) private var importAction = BakeItem.Action.bake.rawValue
-  @AppStorage(Preference.preserveLinks) private var preserveLinks = true
-  @AppStorage(Preference.preserveForms) private var preserveForms = false
-
   private var selectedAction: BakeItem.Action {
     BakeItem.Action(rawValue: importAction) ?? .bake
   }
 
   var body: some View {
-    VStack(spacing: 0) {
+    VStack(alignment: .leading, spacing: 0) {
       VStack(alignment: .leading, spacing: 10) {
+        Text("When adding PDFs")
         Picker("When adding PDFs", selection: $importAction) {
           Text("Bake").tag(BakeItem.Action.bake.rawValue)
           Text("Remove").tag(BakeItem.Action.removeAnnotations.rawValue)
           Text("Extract Images").tag(BakeItem.Action.extract.rawValue)
         }
         .pickerStyle(.segmented)
-        if selectedAction != .extract {
-          Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
-          Toggle("Keep form fields editable", isOn: $preserveForms)
-          if selectedAction == .bake && preserveForms {
-            Text("Keeping editable forms uses content-preserving baking.")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-        }
+        .labelsHidden()
       }
-      .toggleStyle(.checkbox)
+      .frame(maxWidth: 520, alignment: .leading)
+      .frame(maxWidth: .infinity, alignment: .leading)
       .padding([.horizontal, .top], 20)
-      DropZone(isTargeted: isTargeted, action: selectedAction) {
-        oven.add(FilePicker.chooseInputs())
+
+      ScrollView {
+        VStack(alignment: .leading, spacing: 20) {
+          DropZone(isTargeted: isTargeted, action: selectedAction) {
+            oven.add(FilePicker.chooseInputs())
+          }
+          ProcessingOptionsView(action: selectedAction)
+            .frame(maxWidth: 520, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(20)
       }
-      .padding(20)
 
       if !oven.items.isEmpty {
         Divider()
@@ -47,6 +46,7 @@ struct ContentView: View {
         .frame(minHeight: 120)
       }
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .dropDestination(for: URL.self) { urls, _ in
       oven.add(urls)
       return true
@@ -140,6 +140,13 @@ private struct BakeRow: View {
           .lineLimit(2)
           .truncationMode(.middle)
           .help(subtitle)
+        if hasWarning {
+          DisclosureGroup("Details") {
+            Text(subtitle)
+              .font(.caption)
+              .textSelection(.enabled)
+          }
+        }
         if case .annotationDecision = item.status {
           HStack {
             Button("Continue flattening") {

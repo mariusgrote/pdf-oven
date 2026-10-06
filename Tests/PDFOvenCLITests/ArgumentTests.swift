@@ -22,6 +22,15 @@ final class ArgumentTests: XCTestCase {
     try? FileManager.default.removeItem(at: directory)
   }
 
+  func testOverlappingFolderAndFileInputsAreDeduplicated() throws {
+    let input = directory.appendingPathComponent("fixture.pdf")
+    try FixturePDF.data().write(to: input)
+    let alias = directory.appendingPathComponent("alias.pdf")
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: input)
+    let command = try extraction(for: ["extract", "fixture.pdf", ".", "alias.pdf"])
+    XCTAssertEqual(command.inputs, [input])
+  }
+
   func testMissingPDFIsRejected() throws {
     let message = try failure(for: ["extract", "missing.pdf"])
     XCTAssertEqual(message, "file or directory not found: missing.pdf")

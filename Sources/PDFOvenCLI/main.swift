@@ -22,12 +22,22 @@ case .failure(let message):
 
 let extractor = ImageExtractor(extractOptions: command.extractOptions)
 var failures = 0
+var reservedOutputs: [URL] = []
 for input in command.inputs {
+  let reserved = reservedOutputs
+  reservedOutputs.append(
+    Destination.imagesFolder(
+      for: input, folder: command.placement.folder, replace: command.placement.replace,
+      protecting: command.inputs, reserving: reserved))
   do {
     let result = try extractor.extract(
-      input, options: command.placement, protecting: command.inputs)
+      input, options: command.placement, protecting: command.inputs, reserving: reserved)
     var summary = "\(result.written) image\(result.written == 1 ? "" : "s")"
-    if result.skipped > 0 { summary += ", \(result.skipped) skipped" }
+    if !result.skippedSummary.isEmpty { summary += ", " + result.skippedSummary }
+    if let warning = result.warning {
+      FileHandle.standardError.write(Data("pdfoven: \(input.lastPathComponent): \(warning)\n".utf8))
+      failures += 1
+    }
     print("\(input.lastPathComponent): \(summary) → \(result.folder.path)")
   } catch {
     FileHandle.standardError.write(Data("pdfoven: \(error.localizedDescription)\n".utf8))

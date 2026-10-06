@@ -60,6 +60,8 @@ final class PageImageScanner {
   /// really do contain them.
   private var recursing: Set<Int> = []
   private var found: [ImageOccurrence] = []
+  private(set) var unreadableImages = 0
+  private var unreadableStreams: Set<Int> = []
   private var source: ImageSource = .page
   private var annotation: Int?
 
@@ -77,6 +79,8 @@ final class PageImageScanner {
   /// Every image the page's own content paints.
   func contentImages() -> [ImageOccurrence] {
     found = []
+    unreadableImages = 0
+    unreadableStreams = []
     source = .page
     annotation = nil
     let contentStream = pageContentStream
@@ -84,7 +88,7 @@ final class PageImageScanner {
       // The scanner gave up partway. Fall back to the resource dictionary for anything it
       // missed — unless the page has no readable dictionary either, in which case what the
       // scan managed before it stopped is all there is.
-      let seen = Set(found.compactMap(\.stream.identity))
+      let seen = Set(found.compactMap(\.stream.identity)).union(unreadableStreams)
       dictionaryPass(resources: PageImageScanner.resources(of: page.dictionary), skipping: seen)
     }
     return numbered(found)
@@ -92,6 +96,8 @@ final class PageImageScanner {
 
   /// Images carried by the page's annotations: stamp appearances, and image file attachments.
   func markupImages() -> (images: [ImageOccurrence], files: [FilePayload]) {
+    unreadableImages = 0
+    unreadableStreams = []
     let annots = PageImageScanner.annotations(of: page.dictionary)
     guard !annots.isEmpty else { return ([], []) }
     found = []
@@ -198,7 +204,11 @@ final class PageImageScanner {
   private func record(
     _ stream: PDFObject, ctm: CGAffineTransform, in contentStream: CGPDFContentStreamRef
   ) {
-    guard let facts = ImageDecoder.facts(of: stream) else { return }
+    guard let facts = ImageDecoder.facts(of: stream) else {
+      unreadableImages += 1
+      if let identity = stream.identity { unreadableStreams.insert(identity) }
+      return
+    }
     found.append(
       ImageOccurrence(
         stream: stream, facts: facts, page: number, order: 0, source: source,
@@ -218,7 +228,11 @@ final class PageImageScanner {
       else { continue }
       switch xobject["Subtype"]?.name {
       case "Image":
-        guard let facts = ImageDecoder.facts(of: xobject) else { continue }
+        guard let facts = ImageDecoder.facts(of: xobject) else {
+          unreadableImages += 1
+          unreadableStreams.insert(identity)
+          continue
+        }
         found.append(
           ImageOccurrence(
             stream: xobject, facts: facts, page: number, order: 0, source: source,

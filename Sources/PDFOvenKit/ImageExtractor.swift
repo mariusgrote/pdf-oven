@@ -35,9 +35,24 @@ public struct ExtractResult: Sendable {
   public let folder: URL
   /// Files written.
   public let written: Int
-  /// Images found but not written: those removed by the size filters, those nothing could
-  /// read, and every repeat that dedupe folded onto a file already written.
-  public let skipped: Int
+  public let duplicates: Int
+  public let tooSmall: Int
+  public let unreadable: Int
+  /// Occurrences not written, grouped by their reason above.
+  public var skipped: Int { duplicates + tooSmall + unreadable }
+
+  public var skippedSummary: String {
+    var parts: [String] = []
+    if duplicates > 0 { parts.append("\(duplicates) duplicate\(duplicates == 1 ? "" : "s")") }
+    if tooSmall > 0 { parts.append("\(tooSmall) too small") }
+    if unreadable > 0 { parts.append("\(unreadable) unreadable") }
+    return parts.joined(separator: " · ")
+  }
+
+  public var warning: String? {
+    unreadable > 0
+      ? "\(unreadable) image occurrence\(unreadable == 1 ? "" : "s") could not be extracted." : nil
+  }
   /// Total size of everything written.
   public let bytes: Int
 }
@@ -80,14 +95,18 @@ public struct ImageExtractor: PDFOperation {
 
   /// `Options.suffix` is unused here — the output is a folder, always named `<stem>-images`.
   public func run(inputs: [URL], options: Options) throws -> [OperationResult] {
-    try inputs.map { input in
-      let result = try extract(input, options: options, protecting: inputs)
+    var outputs: [URL] = []
+    return try inputs.map { input in
+      let result = try extract(input, options: options, protecting: inputs, reserving: outputs)
+      outputs.append(result.folder)
       let size = (try? input.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
       return OperationResult(output: result.folder, inputBytes: size, outputBytes: result.bytes)
     }
   }
 
-  public func extract(_ input: URL, options: Options, protecting others: [URL] = []) throws
+  public func extract(
+    _ input: URL, options: Options, protecting others: [URL] = [], reserving outputs: [URL] = []
+  ) throws
     -> ExtractResult
   {
     guard let document = CGPDFDocument(input as CFURL) else { throw ExtractError.cannotOpen(input) }
@@ -97,7 +116,8 @@ public struct ImageExtractor: PDFOperation {
     guard document.numberOfPages > 0 else { throw ExtractError.emptyDocument(input) }
 
     let folder = Destination.imagesFolder(
-      for: input, folder: options.folder, replace: options.replace, protecting: others)
+      for: input, folder: options.folder, replace: options.replace, protecting: others,
+      reserving: outputs)
     do {
       try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     } catch {
@@ -113,11 +133,13 @@ public struct ImageExtractor: PDFOperation {
         for occurrence in scanner.contentImages() {
           try autoreleasepool { try session.take(occurrence, on: page) }
         }
+        session.recordUnreadable(scanner.unreadableImages)
         guard extractOptions.includeMarkup else { return }
         let markup = scanner.markupImages()
         for occurrence in markup.images {
           try autoreleasepool { try session.take(occurrence, on: page) }
         }
+        session.recordUnreadable(scanner.unreadableImages)
         for payload in markup.files { try session.take(payload) }
       }
     }
@@ -137,10 +159,15 @@ private final class Session {
   /// Content hashes of written files, for dedupe.
   private var writtenContent: Set<String> = []
   /// XObjects already handled, so repeated uses do not produce another file.
-  private var handledStreams: Set<Int> = []
+  private enum HandledImage {
+    case written, tooSmall, unreadable
+  }
+  private var handledStreams: [Int: HandledImage] = [:]
   private var usedNames: Set<String> = []
   private(set) var written = 0
-  private(set) var skipped = 0
+  private var duplicates = 0
+  private var tooSmall = 0
+  private var unreadable = 0
   private(set) var bytes = 0
 
   init(folder: URL, options: ExtractOptions) {
@@ -149,7 +176,13 @@ private final class Session {
   }
 
   var result: ExtractResult {
-    ExtractResult(folder: folder, written: written, skipped: skipped, bytes: bytes)
+    ExtractResult(
+      folder: folder, written: written, duplicates: duplicates, tooSmall: tooSmall,
+      unreadable: unreadable, bytes: bytes)
+  }
+
+  func recordUnreadable(_ count: Int) {
+    unreadable += count
   }
 
   // MARK: Image XObjects
@@ -160,13 +193,17 @@ private final class Session {
 
     // A repeat of an image already dealt with needs no second file, but it is still an
     // occurrence we found and did not write.
-    if options.dedupe, let identity, handledStreams.contains(identity) {
-      skipped += 1
+    if options.dedupe, let identity, let handled = handledStreams[identity] {
+      switch handled {
+      case .written: duplicates += 1
+      case .tooSmall: tooSmall += 1
+      case .unreadable: unreadable += 1
+      }
       return
     }
     guard facts.width >= options.minPixelSize, facts.height >= options.minPixelSize else {
-      skipped += 1
-      markHandled(identity)
+      tooSmall += 1
+      markHandled(identity, as: .tooSmall)
       return
     }
 
@@ -182,30 +219,30 @@ private final class Session {
       guard let fallback = Rasterizer.render(occurrence, on: page),
         let encoded = ImageDecoder.encodePNG(fallback)
       else {
-        skipped += 1
-        markHandled(identity)
+        unreadable += 1
+        markHandled(identity, as: .unreadable)
         return
       }
       image = encoded
     }
 
     guard image.data.count >= options.minByteSize else {
-      skipped += 1
-      markHandled(identity)
+      tooSmall += 1
+      markHandled(identity, as: .tooSmall)
       return
     }
 
     // Two different XObjects can still hold the same picture.
     let key = contentKey(image.data, facts: facts)
     if options.dedupe, writtenContent.contains(key) {
-      skipped += 1
-      markHandled(identity)
+      duplicates += 1
+      markHandled(identity, as: .written)
       return
     }
 
     let filename = unique(name(for: occurrence) + "." + image.fileExtension)
     try write(image.data, as: filename)
-    markHandled(identity)
+    markHandled(identity, as: .written)
     writtenContent.insert(key)
   }
 
@@ -221,11 +258,11 @@ private final class Session {
     if let facts = payload.facts,
       facts.width < options.minPixelSize || facts.height < options.minPixelSize
     {
-      skipped += 1
+      tooSmall += 1
       return
     }
     guard payload.data.count >= options.minByteSize else {
-      skipped += 1
+      tooSmall += 1
       return
     }
     let digest = SHA256.hash(data: payload.data).map { String(format: "%02x", $0) }.joined()
@@ -233,7 +270,7 @@ private final class Session {
     let key =
       "file-\(digest)-\(facts?.width ?? 0)x\(facts?.height ?? 0)-\(facts?.bitsPerComponent ?? 0)"
     if options.dedupe, writtenContent.contains(key) {
-      skipped += 1
+      duplicates += 1
       return
     }
     let filename = unique(name(for: payload) + "." + payload.fileExtension)
@@ -256,8 +293,8 @@ private final class Session {
     bytes += data.count
   }
 
-  private func markHandled(_ identity: Int?) {
-    if options.dedupe, let identity { handledStreams.insert(identity) }
+  private func markHandled(_ identity: Int?, as outcome: HandledImage) {
+    if options.dedupe, let identity { handledStreams[identity] = outcome }
   }
 
   // MARK: Naming
