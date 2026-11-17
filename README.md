@@ -3,8 +3,9 @@
 A small native macOS app that "bakes" PDF annotations into page content so they can no
 longer be selected, moved, or edited.
 
-It can also remove annotations without baking them, or extract the image files stored
-inside a PDF, including images used by stamp annotations and image file attachments.
+It can also remove annotations without baking them, remove password restrictions
+(printing, copying, editing) from PDFs that open without a password, or extract the image
+files stored inside a PDF, including images used by stamp annotations and image file attachments.
 
 ## Build
 
@@ -29,13 +30,14 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
 
 ## Use
 
-- Select Bake, Remove, or Extract Images in the main window, then drag PDFs (or folders of PDFs) onto it,
+- Select Bake, Remove, Extract Images, or Unlock in the main window, then drag PDFs (or folders of PDFs) onto it,
   or press ⌘O. The selected action also applies to files opened through Finder.
 - For Bake and Remove, the two checkboxes independently keep hyperlinks clickable and form fields editable.
   Keeping forms retains their values. Each import keeps the choices from when it was added.
 - Bake saves each file next to the original as `name-baked.pdf`.
 - Remove saves `name_cleaned.pdf`. It discards markup and, unless their checkboxes are
   enabled, hyperlinks and form fields with their values.
+- Unlock saves `name_unlocked.pdf`. See [Remove password restrictions](#remove-password-restrictions).
 - Extract Images writes images to `name-images/`. Press ⌘E to extract directly regardless
   of the selected action.
 - Use "Extraction options" below the drop zone to set the minimum width/height and file size, combine duplicates,
@@ -46,8 +48,8 @@ the app bundle. People using PDF Oven do not need qpdf, Homebrew, or another run
   Completed files can be imported again. Outputs in the current list receive distinct names,
   even when replacement is enabled. Clear the list to start a new run with fresh reservations.
 - Options below the drop zone show the controls for the selected action: baking method and
-  filename suffix for Bake, link/form preservation and lossless compression for Bake and Remove,
-  and image filters for Extract Images.
+  filename suffix for Bake, link/form preservation for Bake and Remove, lossless compression
+  for Bake, Remove, and Unlock, and image filters for Extract Images.
 - ⌘, opens Settings for the shared output folder, replacement policy, and Finder reveal.
   These preferences apply to every action.
 - The app registers as a PDF handler, so you can also drop files on its Dock icon or use
@@ -89,8 +91,9 @@ The following behavior describes the compatibility redraw:
 - Page rotation and offset crop boxes are baked into the output geometry.
 - Document title/author/subject/creator/keywords are carried over.
 - Not carried over: outlines/bookmarks, embedded attachments, and unfilled form
-  fields (fields are baked in at their current values). Password-protected files are skipped
-  with an error rather than being unlocked.
+  fields (fields are baked in at their current values).
+- PDFs that need a password to open are skipped with an error. Restricted PDFs that open
+  without one are decrypted first, so the result carries no restrictions.
 
 Originals are never modified.
 
@@ -107,6 +110,19 @@ only to baking. The checkboxes preserve links and editable forms independently f
 Originals remain protected, and existing output names are numbered when replacement is
 disabled. The result is validated for page count and absence of unwanted annotations and
 form structures before it is saved.
+
+## Remove password restrictions
+
+Some PDFs open without a password but are encrypted with an owner password that disables
+printing, copying, or editing. Unlock writes `name_unlocked.pdf` without the encryption and
+its restrictions. The bundled qpdf helper decrypts the file with the empty user password and
+copies the content, annotations, links, and form fields unchanged. RC4 and AES encryption
+(40-bit to 256-bit) are supported.
+
+Unlock never guesses or removes an open password: PDFs that need one are reported and skipped.
+PDFs that are not encrypted are reported as having nothing to unlock, and no file is written.
+The result is checked for its page count and the absence of encryption before it is saved.
+Bake and Remove also process restricted PDFs this way, so their results are unrestricted too.
 
 ## Extract images from the command line
 

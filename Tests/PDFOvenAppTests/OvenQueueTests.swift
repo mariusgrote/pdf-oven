@@ -48,7 +48,7 @@ final class OvenQueueTests: XCTestCase {
         return XCTFail("\(item.action) ended as \(item.status)")
       }
       switch item.action {
-      case .bake, .removeAnnotations:
+      case .bake, .removeAnnotations, .unlock:
         XCTAssertEqual(output.pathExtension, "pdf")
         XCTAssertNotEqual(output, input)
       case .extract:
@@ -351,6 +351,47 @@ final class OvenQueueTests: XCTestCase {
       XCTAssertEqual(oven.items.last?.outputURL?.lastPathComponent, "plan-baked 3.pdf")
       XCTAssertEqual(try outputs.prefix(4).map { try Data(contentsOf: $0) }, saved)
       for input in inputs { XCTAssertEqual(try Data(contentsOf: input), FixturePDF.data()) }
+    }
+  }
+
+  func testUnlockSavesRestrictedPDFsAndSkipsUnencryptedOnes() async throws {
+    let configured = ProcessInfo.processInfo.environment["PDFOVEN_TEST_QPDF"]
+    let candidates = [configured, "/usr/local/bin/qpdf", "/opt/homebrew/bin/qpdf"].compactMap { $0 }
+    guard let helper = candidates.first(where: FileManager.default.isExecutableFile(atPath:))
+    else { throw XCTSkip("Set PDFOVEN_TEST_QPDF for the unlock queue integration test") }
+    try await withPreferences([Preference.optimize: false]) {
+      let previousFolder = UserDefaults.standard.object(forKey: Preference.destinationFolder)
+      defer { UserDefaults.standard.set(previousFolder, forKey: Preference.destinationFolder) }
+      UserDefaults.standard.removeObject(forKey: Preference.destinationFolder)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pdfoven-unlock-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let plain = directory.appendingPathComponent("plain.pdf")
+      try FixturePDF.data().write(to: plain)
+      let restricted = directory.appendingPathComponent("restricted.pdf")
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: helper)
+      process.arguments = [
+        "--encrypt", "--user-password=", "--owner-password=owner", "--bits=256",
+        "--print=none", "--modify=none", "--extract=n", "--", plain.path, restricted.path,
+      ]
+      try process.run()
+      process.waitUntilExit()
+      XCTAssertEqual(process.terminationStatus, 0)
+
+      let oven = Oven(qpdfExecutable: URL(fileURLWithPath: helper))
+      oven.add([restricted, plain], action: .unlock)
+      try await waitUntilIdle(oven)
+      let unlocked = try XCTUnwrap(oven.items[0].outputURL, "\(oven.items[0].status)")
+      XCTAssertEqual(unlocked.lastPathComponent, "restricted_unlocked.pdf")
+      XCTAssertFalse(try XCTUnwrap(PDFDocument(url: unlocked)).isEncrypted)
+      guard case .skipped = oven.items[1].status else {
+        return XCTFail("unencrypted input ended as \(oven.items[1].status)")
+      }
+      XCTAssertFalse(
+        FileManager.default.fileExists(
+          atPath: directory.appendingPathComponent("plain_unlocked.pdf").path))
     }
   }
 

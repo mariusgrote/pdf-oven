@@ -60,13 +60,17 @@ public enum BakeError: LocalizedError {
   case formStructureRemains
   case pageCountChanged(expected: Int, actual: Int)
   case outputMatchesInput(URL)
+  case notEncrypted(URL)
+  case stillEncrypted(URL)
 
   public var errorDescription: String? {
     switch self {
     case .cannotOpen(let url):
       return "\(url.lastPathComponent) is not a readable PDF."
     case .passwordProtected(let url):
-      return "\(url.lastPathComponent) is password protected."
+      return
+        "\(url.lastPathComponent) needs a password to open. PDF Oven can only remove "
+        + "restrictions from PDFs that open without one."
     case .emptyDocument(let url):
       return "\(url.lastPathComponent) has no pages."
     case .contextFailed:
@@ -99,6 +103,10 @@ public enum BakeError: LocalizedError {
     case .outputMatchesInput(let url):
       return
         "The output resolves to the input \(url.lastPathComponent). The original was not changed."
+    case .notEncrypted(let url):
+      return "\(url.lastPathComponent) is not password protected. Nothing was saved."
+    case .stillEncrypted(let url):
+      return "qpdf could not remove the encryption from \(url.lastPathComponent)."
     }
   }
 }
@@ -135,11 +143,51 @@ public enum Baker {
       removingAnnotations: true)
   }
 
-  private static func process(
-    input: URL, to output: URL, options: BakeOptions, removingAnnotations: Bool
+  /// Removes the encryption, and with it the permission restrictions (printing, copying,
+  /// editing), from a PDF that opens without a password. Content is copied unchanged.
+  /// PDFs that need a password to open and PDFs that are not encrypted are refused.
+  @discardableResult
+  public static func unlock(
+    input: URL,
+    to output: URL,
+    optimize: Bool = false,
+    qpdfExecutable: URL? = nil
   ) throws -> BakeResult {
     guard !sameFile(input, output) else { throw BakeError.outputMatchesInput(input) }
     let source = try open(input)
+    guard source.isEncrypted else { throw BakeError.notEncrypted(input) }
+    let pageCount = source.pageCount
+    let inputBytes = fileSize(input)
+    let qpdf = try QPDF(executable: qpdfExecutable)
+    let work = TemporaryOutputs(beside: output)
+    defer { work.removeAll() }
+
+    try decrypt(input, to: work.baked, using: qpdf)
+    let validateUnlocked = { (url: URL) in
+      let document = try open(url)
+      guard !document.isEncrypted else { throw BakeError.stillEncrypted(input) }
+      guard document.pageCount == pageCount else {
+        throw BakeError.pageCountChanged(expected: pageCount, actual: document.pageCount)
+      }
+    }
+    try validateUnlocked(work.baked)
+    return try finish(
+      work, at: output, qpdf: optimize ? qpdf : nil, inputBytes: inputBytes,
+      optimizationWarning: nil, validate: validateUnlocked)
+  }
+
+  /// Writes an unencrypted copy of `input`, refusing the result if it is still encrypted.
+  private static func decrypt(_ input: URL, to output: URL, using qpdf: QPDF) throws {
+    try qpdf.decrypt(input: input, output: output)
+    guard !(try open(output)).isEncrypted else { throw BakeError.stillEncrypted(input) }
+  }
+
+  private static func process(
+    input original: URL, to output: URL, options: BakeOptions, removingAnnotations: Bool
+  ) throws -> BakeResult {
+    guard !sameFile(original, output) else { throw BakeError.outputMatchesInput(original) }
+    var input = original
+    var source = try open(input)
     let pageCount = source.pageCount
     let inputBytes = fileSize(input)
     var optimizationWarning: String?
@@ -159,6 +207,15 @@ public enum Baker {
 
     let work = TemporaryOutputs(beside: output)
     defer { work.removeAll() }
+
+    // Restricted PDFs that open without a password are processed from a decrypted copy, so
+    // the result carries no encryption or permission restrictions.
+    if source.isEncrypted {
+      try decrypt(
+        input, to: work.decrypted, using: qpdf ?? QPDF(executable: options.qpdfExecutable))
+      input = work.decrypted
+      source = try open(input)
+    }
 
     if !removingAnnotations, options.method != .redraw, !options.allowMissingAppearance,
       let missing = try firstAnnotationWithoutAppearance(
@@ -204,18 +261,29 @@ public enum Baker {
         try FileManager.default.moveItem(at: work.optimized, to: work.baked)
       }
     }
-    try validate(
-      work.baked, expectedPages: pageCount, preserveLinks: options.preserveLinks,
-      preserveForms: options.preserveForms)
+    let validateResult = { (url: URL) in
+      try validate(
+        url, expectedPages: pageCount, preserveLinks: options.preserveLinks,
+        preserveForms: options.preserveForms)
+    }
+    try validateResult(work.baked)
+    return try finish(
+      work, at: output, qpdf: options.optimize ? qpdf : nil, inputBytes: inputBytes,
+      optimizationWarning: optimizationWarning, validate: validateResult)
+  }
 
+  /// Optionally compresses `work.baked`, keeps the smaller valid file and installs it.
+  private static func finish(
+    _ work: TemporaryOutputs, at output: URL, qpdf: QPDF?, inputBytes: Int,
+    optimizationWarning: String?, validate: (URL) throws -> Void
+  ) throws -> BakeResult {
+    var optimizationWarning = optimizationWarning
     var chosen = work.baked
     var optimized = false
-    if let qpdf, options.optimize {
+    if let qpdf {
       do {
         try qpdf.optimize(input: work.baked, output: work.optimized)
-        try validate(
-          work.optimized, expectedPages: pageCount, preserveLinks: options.preserveLinks,
-          preserveForms: options.preserveForms)
+        try validate(work.optimized)
         if fileSize(work.optimized) < fileSize(work.baked) {
           chosen = work.optimized
           optimized = true
@@ -589,17 +657,20 @@ public enum Baker {
 }
 
 private struct TemporaryOutputs {
+  let decrypted: URL
   let baked: URL
   let optimized: URL
 
   init(beside output: URL) {
     let directory = output.deletingLastPathComponent()
     let token = UUID().uuidString
+    decrypted = directory.appendingPathComponent(".pdfoven-\(token)-decrypted.pdf")
     baked = directory.appendingPathComponent(".pdfoven-\(token)-baked.pdf")
     optimized = directory.appendingPathComponent(".pdfoven-\(token)-optimized.pdf")
   }
 
   func removeAll() {
+    try? FileManager.default.removeItem(at: decrypted)
     try? FileManager.default.removeItem(at: baked)
     try? FileManager.default.removeItem(at: optimized)
   }
@@ -783,6 +854,11 @@ private struct QPDF {
     try JSONSerialization.data(withJSONObject: ["qpdf": [sections[0], objects]])
       .write(to: update)
     try run(["--update-from-json=" + update.path, "--", input.path, output.path])
+  }
+
+  /// Opens with the empty user password and writes the document without encryption.
+  func decrypt(input: URL, output: URL) throws {
+    try run(["--decrypt", "--", input.path, output.path])
   }
 
   func optimize(input: URL, output: URL) throws {

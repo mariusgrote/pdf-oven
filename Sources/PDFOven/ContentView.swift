@@ -17,6 +17,7 @@ struct ContentView: View {
           Text("Bake").tag(BakeItem.Action.bake.rawValue)
           Text("Remove").tag(BakeItem.Action.removeAnnotations.rawValue)
           Text("Extract Images").tag(BakeItem.Action.extract.rawValue)
+          Text("Unlock").tag(BakeItem.Action.unlock.rawValue)
         }
         .pickerStyle(.segmented)
         .labelsHidden()
@@ -89,12 +90,24 @@ private struct DropZone: View {
       return "Annotations are removed and saved as a new PDF with the suffix _cleaned."
     case .extract:
       return "Embedded images are extracted and saved in a folder named name-images."
+    case .unlock:
+      return
+        "Password restrictions such as printing, copying, and editing are removed and saved "
+        + "as a new PDF with the suffix _unlocked."
+    }
+  }
+
+  private var symbol: String {
+    switch action {
+    case .extract: return "photo.on.rectangle.angled"
+    case .unlock: return "lock.open"
+    case .bake, .removeAnnotations: return "doc.on.doc"
     }
   }
 
   var body: some View {
     VStack(spacing: 10) {
-      Image(systemName: action == .extract ? "photo.on.rectangle.angled" : "doc.on.doc")
+      Image(systemName: symbol)
         .font(.system(size: 40, weight: .light))
         .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
       Text("Drop PDFs here")
@@ -179,6 +192,8 @@ private struct BakeRow: View {
       ProgressView().controlSize(.small)
     case .done:
       Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+    case .skipped:
+      Image(systemName: "minus.circle").foregroundStyle(.secondary)
     case .doneWithWarning, .failed, .annotationDecision:
       Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
     }
@@ -198,7 +213,7 @@ private struct BakeRow: View {
     case .done(_, let detail): return detail
     case .doneWithWarning(_, let detail, let warning):
       return "\(warning) · \(detail)"
-    case .failed(let message): return message
+    case .failed(let message), .skipped(let message): return message
     case .annotationDecision(let page, let subtype):
       return "Page \(page) has a visible \(subtype) annotation without an appearance. "
         + "Continuing may omit it. Choose how to bake this file."

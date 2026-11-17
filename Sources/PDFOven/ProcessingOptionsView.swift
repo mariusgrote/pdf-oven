@@ -43,8 +43,17 @@ struct ProcessingOptionsView: View {
           .font(.caption)
           .foregroundStyle(.secondary)
       } else {
-        Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
-        Toggle("Keep form fields editable", isOn: $preserveForms)
+        if action == .unlock {
+          Text(
+            "Only PDFs that open without a password can be unlocked. Content, links, forms, "
+              + "and annotations are kept unchanged."
+          )
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        } else {
+          Toggle("Keep hyperlinks clickable", isOn: $preserveLinks)
+          Toggle("Keep form fields editable", isOn: $preserveForms)
+        }
         if action == .bake {
           if preserveForms {
             LabeledContent("Baking method") {
