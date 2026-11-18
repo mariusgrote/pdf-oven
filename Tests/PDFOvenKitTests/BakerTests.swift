@@ -788,6 +788,132 @@ final class BakerTests: XCTestCase {
     }
   }
 
+  func testUnlockRemovesOwnerPasswordRestrictionsAndKeepsContent() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let plain = directory.appendingPathComponent("plain.pdf")
+    try BakingPDF(link: true).data().write(to: plain)
+    let reference = try XCTUnwrap(CGPDFDocument(plain as CFURL))
+    let referencePage = try XCTUnwrap(reference.page(at: 1))
+
+    for encryption in OwnerEncryption.allCases {
+      let input = directory.appendingPathComponent("restricted-\(encryption).pdf")
+      try encrypt(plain, to: input, encryption, qpdf: qpdf)
+      let original = try Data(contentsOf: input)
+      let restricted = try XCTUnwrap(PDFDocument(url: input))
+      XCTAssertTrue(restricted.isEncrypted)
+      XCTAssertFalse(restricted.isLocked)
+      XCTAssertFalse(restricted.allowsCopying)
+
+      for optimize in [false, true] {
+        let output = directory.appendingPathComponent("unlocked.pdf")
+        let result = try Baker.unlock(
+          input: input, to: output, optimize: optimize, qpdfExecutable: qpdf)
+        XCTAssertEqual(result.outputBytes, try Data(contentsOf: output).count)
+        let unlocked = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertFalse(unlocked.isEncrypted, "\(encryption)")
+        XCTAssertTrue(unlocked.allowsCopying)
+        XCTAssertTrue(unlocked.allowsPrinting)
+        XCTAssertTrue(unlocked.allowsDocumentChanges)
+        let document = try XCTUnwrap(CGPDFDocument(output as CFURL))
+        let page = try XCTUnwrap(document.page(at: 1))
+        XCTAssertEqual(try contentBytes(page), try contentBytes(referencePage))
+        // Unlocking is not baking: annotations and links stay as they were.
+        XCTAssertEqual(
+          PageImageScanner.annotations(of: page.dictionary).count,
+          PageImageScanner.annotations(of: referencePage.dictionary).count)
+        XCTAssertEqual(try Data(contentsOf: input), original)
+      }
+    }
+  }
+
+  func testUnlockRefusesUnencryptedAndUserPasswordPDFs() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let plain = directory.appendingPathComponent("plain.pdf")
+    try BakingPDF().data().write(to: plain)
+    let output = directory.appendingPathComponent("unlocked.pdf")
+
+    XCTAssertThrowsError(try Baker.unlock(input: plain, to: output, qpdfExecutable: qpdf)) {
+      guard case BakeError.notEncrypted = $0 else { return XCTFail("\($0)") }
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+
+    let locked = directory.appendingPathComponent("locked.pdf")
+    try runQPDF(
+      qpdf,
+      [
+        "--encrypt", "--user-password=open", "--owner-password=owner", "--bits=256", "--",
+        plain.path, locked.path,
+      ])
+    XCTAssertThrowsError(try Baker.unlock(input: locked, to: output, qpdfExecutable: qpdf)) {
+      guard case BakeError.passwordProtected = $0 else { return XCTFail("\($0)") }
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    XCTAssertThrowsError(try Baker.unlock(input: locked, to: locked, qpdfExecutable: qpdf))
+  }
+
+  func testBakingAndRemovingRestrictedPDFsWriteUnencryptedResults() throws {
+    let qpdf = try requireQPDF()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let plain = directory.appendingPathComponent("plain.pdf")
+    try BakingPDF().data().write(to: plain)
+    let input = directory.appendingPathComponent("restricted.pdf")
+    try encrypt(plain, to: input, .aes256, qpdf: qpdf)
+    let output = directory.appendingPathComponent("result.pdf")
+
+    for method in FlatteningMethod.allCases {
+      try Baker.bake(
+        input: input, to: output, options: BakeOptions(method: method, qpdfExecutable: qpdf))
+      XCTAssertFalse(try XCTUnwrap(PDFDocument(url: output)).isEncrypted, "\(method)")
+      try assertStaticVectorPDF(output)
+    }
+    try Baker.removeAnnotations(input: input, to: output, qpdfExecutable: qpdf)
+    XCTAssertFalse(try XCTUnwrap(PDFDocument(url: output)).isEncrypted)
+    // No decrypted scratch copy is left behind.
+    let leftovers = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+      .filter { $0.hasPrefix(".pdfoven-") }
+    XCTAssertEqual(leftovers, [])
+  }
+
+  private enum OwnerEncryption: CaseIterable {
+    case rc4_40, rc4_128, aes128, aes256
+
+    var arguments: [String] {
+      switch self {
+      case .rc4_40:
+        return ["--bits=40", "--print=n", "--modify=n", "--extract=n", "--annotate=n"]
+      case .rc4_128:
+        return ["--bits=128", "--use-aes=n", "--print=none", "--modify=none", "--extract=n"]
+      case .aes128:
+        return ["--bits=128", "--use-aes=y", "--print=none", "--modify=none", "--extract=n"]
+      case .aes256:
+        return ["--bits=256", "--print=none", "--modify=none", "--extract=n"]
+      }
+    }
+  }
+
+  private func encrypt(_ input: URL, to output: URL, _ encryption: OwnerEncryption, qpdf: URL)
+    throws
+  {
+    try runQPDF(
+      qpdf,
+      ["--allow-weak-crypto", "--encrypt", "--user-password=", "--owner-password=owner"]
+        + encryption.arguments + ["--", input.path, output.path])
+  }
+
+  private func runQPDF(_ qpdf: URL, _ arguments: [String]) throws {
+    let process = Process()
+    process.executableURL = qpdf
+    process.arguments = arguments
+    try process.run()
+    process.waitUntilExit()
+    XCTAssertEqual(process.terminationStatus, 0, "qpdf \(arguments)")
+  }
+
   private func requireQPDF() throws -> URL {
     if let configured = ProcessInfo.processInfo.environment["PDFOVEN_TEST_QPDF"] {
       let executable = URL(fileURLWithPath: configured)

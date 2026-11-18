@@ -6,6 +6,8 @@ public enum Destination {
   public static let defaultSuffix = "-baked"
   /// Appended to the stem when annotations are discarded.
   public static let cleanedSuffix = "_cleaned"
+  /// Appended to the stem when encryption and permission restrictions are removed.
+  public static let unlockedSuffix = "_unlocked"
   /// Appended to the stem for the folder an extraction fills.
   public static let imagesSuffix = "-images"
 

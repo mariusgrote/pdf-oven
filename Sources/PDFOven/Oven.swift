@@ -99,12 +99,14 @@ struct BakeItem: Identifiable {
     case bake
     case extract
     case removeAnnotations
+    case unlock
 
     var workingLabel: String {
       switch self {
       case .bake: return "Baking…"
       case .extract: return "Extracting…"
       case .removeAnnotations: return "Removing annotations…"
+      case .unlock: return "Removing restrictions…"
       }
     }
   }
@@ -115,12 +117,14 @@ struct BakeItem: Identifiable {
     case done(URL, String)
     case doneWithWarning(URL, String, String)
     case failed(String)
+    /// Finished without writing anything because there was nothing to do.
+    case skipped(String)
     case annotationDecision(page: Int, subtype: String)
 
     var isPending: Bool {
       switch self {
       case .waiting, .working: return true
-      case .done, .doneWithWarning, .failed, .annotationDecision: return false
+      case .done, .doneWithWarning, .failed, .skipped, .annotationDecision: return false
       }
     }
   }
@@ -238,10 +242,14 @@ final class Oven: ObservableObject {
           for: input, folder: preferences.destination.folder,
           replace: preferences.destination.replace, protecting: protected, reserving: reserved)
       } else {
+        let suffix: String
+        switch action {
+        case .removeAnnotations: suffix = Destination.cleanedSuffix
+        case .unlock: suffix = Destination.unlockedSuffix
+        case .bake, .extract: suffix = preferences.destination.suffix
+        }
         output = Destination.destination(
-          for: input,
-          suffix: action == .removeAnnotations
-            ? Destination.cleanedSuffix : preferences.destination.suffix,
+          for: input, suffix: suffix,
           folder: preferences.destination.folder, replace: preferences.destination.replace,
           protecting: protected, reserving: reserved)
       }
@@ -251,9 +259,13 @@ final class Oven: ObservableObject {
         () -> Result<(URL, String, String?), Error> in
         do {
           switch action {
-          case .bake, .removeAnnotations:
+          case .bake, .removeAnnotations, .unlock:
             let baked: BakeResult
-            if action == .removeAnnotations {
+            if action == .unlock {
+              baked = try Baker.unlock(
+                input: input, to: output, optimize: preferences.bake.optimize,
+                qpdfExecutable: preferences.bake.qpdfExecutable)
+            } else if action == .removeAnnotations {
               baked = try Baker.removeAnnotations(
                 input: input, to: output, optimize: preferences.bake.optimize,
                 preserveLinks: preferences.bake.preserveLinks,
@@ -268,6 +280,7 @@ final class Oven: ObservableObject {
               + ByteCountFormatter.string(
                 fromByteCount: Int64(baked.outputBytes), countStyle: .file)
             if action == .removeAnnotations { detail = "Annotations removed · " + detail }
+            if action == .unlock { detail = "Restrictions removed · " + detail }
             if baked.usedOptimizedFile { detail += " · losslessly compressed" }
             return .success((output, detail, baked.optimizationWarning))
           case .extract:
@@ -311,6 +324,8 @@ final class Oven: ObservableObject {
       case .failure(let error):
         if case BakeError.annotationHasNoAppearance(let page, let subtype) = error {
           items[current].status = .annotationDecision(page: page, subtype: subtype)
+        } else if case BakeError.notEncrypted = error {
+          items[current].status = .skipped(error.localizedDescription)
         } else {
           items[current].status = .failed(error.localizedDescription)
         }

@@ -50,6 +50,8 @@ enum FilePicker {
         message: "Choose PDFs to remove annotations from", prompt: "Remove Annotations")
     case .extract:
       return chooseExtractInputs()
+    case .unlock:
+      return chooseInputs(message: "Choose PDFs to remove restrictions from", prompt: "Unlock")
     }
   }
 
